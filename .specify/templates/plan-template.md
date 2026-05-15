@@ -4,7 +4,7 @@
 
 **Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/plan-template.md` for the execution workflow.
+**Note**: This template is filled in by the `/speckit-plan` command. See `.specify/templates/plan-template.md` for the execution workflow.
 
 ## Summary
 
@@ -40,7 +40,33 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+Verify compliance with all seven Core Principles and Domain Constraints from
+`.specify/memory/constitution.md` (v1.1.0):
+
+- [ ] **I. Brazilian Sector Compliance** — Model outputs reference applicable ONS/ANEEL/CCEE
+  norms by name. Curtailment definition follows ANEEL conventions. Regulatory deviations
+  are surfaced as named, structured findings.
+- [ ] **II. No Data Fabrication** — Every numerical assumption has a documented source and
+  physical/commercial justification. All parameters are configurable with documented
+  defaults and validated bounds. Synthetic data is labelled as synthetic in all outputs.
+- [ ] **III. Test-First** — Failing unit tests are written before implementation for all
+  risk model logic, BESS dispatch functions, and economic formulas. At least one manual
+  reference-case test exists for each economic formula.
+- [ ] **IV. Reproducible Results** — Every run writes a JSON manifest (tool version,
+  timestamp, input SHA-256, RNG seed). Stochastic processes use a configurable seeded RNG.
+  Identical manifests produce identical numerical outputs.
+- [ ] **V. Modular Python Architecture** — All public functions/classes have PEP 484 type
+  annotations with unit suffixes in parameter names. NumPy-style docstrings present on all
+  public APIs. No module exceeds 400 lines. No magic numbers in source.
+- [ ] **VI. Engineering-Quality Visualizations** — Every chart has title, axis labels with
+  units, and legend. Perceptually uniform colour scales used for scalar data. Hover tooltips
+  show value + unit. HTML report includes "Model Assumptions & Limitations" section.
+- [ ] **VII. SI Units & Brazilian Sector Conventions** — Power in MWac/MWp, energy in MWh,
+  frequency in Hz (nominal 60 Hz), currency labelled BRL/MWh or USD/kWh. Unit labels in
+  variable names/annotations, docstrings, axis labels, and table column headers.
+- [ ] **Domain Constraints** — Time-series is strictly ordered hourly (8,760 values).
+  Brazilian grid frequency reference is 60 Hz. No silent failures — all edge cases raise
+  structured exceptions. Results normalised to 1 MWac with explicit normalisation note.
 
 ## Project Structure
 
@@ -48,12 +74,12 @@
 
 ```text
 specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+├── plan.md              # This file (/speckit-plan command output)
+├── research.md          # Phase 0 output (/speckit-plan command)
+├── data-model.md        # Phase 1 output (/speckit-plan command)
+├── quickstart.md        # Phase 1 output (/speckit-plan command)
+├── contracts/           # Phase 1 output (/speckit-plan command)
+└── tasks.md             # Phase 2 output (/speckit-tasks command - NOT created by /speckit-plan)
 ```
 
 ### Source Code (repository root)
