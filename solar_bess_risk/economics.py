@@ -1,12 +1,11 @@
-"""Economic metrics: LCOS, revenue, payback, scenario results.
+"""Economic metrics: exposure, savings, payback, coverage (v2).
 
 Functions
 ---------
-compute_incremental_revenue(dispatch, prices, rte_pct) -> float
-compute_lcos(bess_cfg, dispatch, params) -> float | None
-compute_payback(capex_brl, revenue_brl_yr) -> float | None
-compute_scenario_result(bess_cfg, dispatch, prices, params) -> ScenarioResult
-compute_payback_sensitivity(base_result, prices, params) -> np.ndarray
+compute_scenario_economics(solar, prices, scenario, dispatch, params) -> ScenarioResult
+compute_all_scenarios(solar, prices, dispatch_pairs, params) -> list[ScenarioResult]
+build_top10_peak_hours(results, prices) -> pd.DataFrame
+payback_display(result) -> str
 """
 
 from __future__ import annotations
@@ -14,179 +13,131 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 
-from solar_bess_risk.config import (
-    HOURS_PER_YEAR,
-    LCOS_NOT_COMPUTABLE,
-    PAYBACK_NOT_ACHIEVABLE,
-    SimulationParams,
-)
+from solar_bess_risk.config import HOURS_PER_YEAR, PAYBACK_NOT_ACHIEVABLE, SimulationParams
 from solar_bess_risk.data_sources import PriceProfile
-from solar_bess_risk.simulation import BESSConfig, DispatchResult
+from solar_bess_risk.profile import SolarProfile
+from solar_bess_risk.simulation import DispatchResult, ScenarioDefinition
 
 
 @dataclass
 class ScenarioResult:
-    """Scalar annual metrics for one (ILR, BESS %, duration) scenario.
+    """Scalar annual metrics for one scenario (A, B, or C).
 
     Parameters
     ----------
-    scenario_id : tuple[float, float, float]
-        ``(ilr, bess_size_ratio_pct, duration_h)``.
-    curtailment_without_bess_mwh_yr : float
-        Total curtailment without BESS in MWh/yr.
-    curtailment_with_bess_mwh_yr : float
-        Total curtailment with BESS in MWh/yr.
-    curtailment_avoided_pct : float
-        Percentage of curtailment avoided.
-    effective_cf_pct : float
-        Effective capacity factor in %.
-    equivalent_cycles_yr : float
-        Equivalent BESS cycles per year.
-    incremental_revenue_brl_yr : float
-        Incremental annual revenue in BRL/yr.
-    energy_from_curtail_mwh_yr : float
-        Annual energy absorbed from curtailment in MWh/yr.
-    energy_from_grid_mwh_yr : float
-        Annual energy charged from grid top-up in MWh/yr.
-    lcos_brl_per_mwh : float | None
-        LCOS in BRL/MWh; None if not computable.
-    payback_yr : float | None
-        Simple payback in years; None if not achievable.
-    top_up_hour_slots : list[str]
-        Grid top-up hour slots as HH:00 strings.
-    """
-
-    scenario_id: tuple[float, float, float]
-    curtailment_without_bess_mwh_yr: float
-    curtailment_with_bess_mwh_yr: float
-    curtailment_avoided_pct: float
-    effective_cf_pct: float
-    equivalent_cycles_yr: float
-    incremental_revenue_brl_yr: float
-    energy_from_curtail_mwh_yr: float
-    energy_from_grid_mwh_yr: float
-    lcos_brl_per_mwh: float | None
-    payback_yr: float | None
-    top_up_hour_slots: list[str]
-
-    @property
-    def lcos_display(self) -> str:
-        """Display string for LCOS."""
-        if self.lcos_brl_per_mwh is None:
-            return LCOS_NOT_COMPUTABLE
-        return f"{self.lcos_brl_per_mwh:,.2f}"
-
-    @property
-    def payback_display(self) -> str:
-        """Display string for payback."""
-        if self.payback_yr is None:
-            return PAYBACK_NOT_ACHIEVABLE
-        return f"{self.payback_yr:,.1f}"
-
-
-def compute_incremental_revenue(
-    dispatch: DispatchResult,
-    prices: PriceProfile,
-    rte_pct: float,
-) -> float:
-    """Compute incremental annual revenue from curtailment charging.
-
-    Parameters
-    ----------
+    scenario : ScenarioDefinition
+        The source scenario definition.
     dispatch : DispatchResult
-        Hour-by-hour dispatch results.
-    prices : PriceProfile
-        Hourly price profile.
-    rte_pct : float
-        Round-trip efficiency in %.
-
-    Returns
-    -------
-    float
-        Annual revenue in BRL/yr.
-    """
-    rte = rte_pct / 100.0
-    return float(
-        np.sum(dispatch.charge_curtail_mwh * prices.prices_brl_per_mwh * rte)
-    )
-
-
-def compute_lcos(
-    bess_cfg: BESSConfig,
-    dispatch: DispatchResult,
-    params: SimulationParams,
-) -> float | None:
-    """Compute Levelized Cost of Storage (LCOS).
-
-    Parameters
-    ----------
-    bess_cfg : BESSConfig
-        BESS configuration.
-    dispatch : DispatchResult
-        Hour-by-hour dispatch results.
-    params : SimulationParams
-        Simulation parameters.
-
-    Returns
-    -------
-    float | None
-        LCOS in BRL/MWh, or None if denominator is zero.
-    """
-    e_y1 = float(np.sum(dispatch.discharge_mwh))
-    if e_y1 <= 0:
-        return None
-
-    d = params.degradation_pct_yr / 100.0
-    r = params.discount_rate_pct / 100.0
-    n = params.useful_life_yr
-
-    denominator = sum(
-        e_y1 * (1 - d) ** (y - 1) / (1 + r) ** y for y in range(1, n + 1)
-    )
-
-    if denominator <= 0:
-        return None
-
-    return bess_cfg.capex_brl / denominator
-
-
-def compute_payback(capex_brl: float, revenue_brl_yr: float) -> float | None:
-    """Compute simple payback period.
-
-    Parameters
-    ----------
+        Full hourly dispatch time-series.
+    fc : float
+        Capacity factor.
+    garantia_fisica_mw : float
+        Physical guarantee in MW.
+    bess_energy_mwh : float
+        BESS energy capacity in MWh.
+    bess_power_mw : float
+        BESS rated power in MW.
     capex_brl : float
         BESS CAPEX in BRL.
-    revenue_brl_yr : float
-        Annual incremental revenue in BRL/yr.
-
-    Returns
-    -------
-    float | None
-        Payback in years, or None if revenue ≤ 0.
+    annual_exposure_without_bess_brl : float
+        Annual financial exposure without BESS in BRL/yr.
+    annual_exposure_with_bess_brl : float
+        Annual financial exposure with BESS in BRL/yr.
+    annual_savings_brl : float
+        First-year net savings from BESS in BRL/yr after fixed O&M.
+    annual_gross_savings_brl : float
+        First-year exposure reduction before fixed O&M.
+    annual_o_and_m_brl : float
+        Fixed annual O&M cost in BRL/yr.
+    lifetime_net_savings_brl : float
+        Sum of net savings over useful life with degradation.
+    payback_years : float | None
+        Simple payback in years; None if savings <= 0.
+    coverage_pct : float
+        Energy coverage percentage (0-100): how much deficit MWh the BESS eliminates.
+    reducao_exposicao_pct : float
+        Financial exposure reduction percentage (0-100).
+    deficit_mwh_sem_bess : float
+        Total annual deficit MWh without BESS (all hours).
+    deficit_mwh_com_bess : float
+        Total annual deficit MWh with BESS (all hours).
     """
-    if revenue_brl_yr <= 0:
-        return None
-    return capex_brl / revenue_brl_yr
+
+    scenario: ScenarioDefinition
+    dispatch: DispatchResult
+    fc: float
+    garantia_fisica_mw: float
+    bess_energy_mwh: float
+    bess_power_mw: float
+    capex_brl: float
+    annual_exposure_without_bess_brl: float
+    annual_exposure_with_bess_brl: float
+    annual_savings_brl: float
+    annual_gross_savings_brl: float
+    annual_o_and_m_brl: float
+    lifetime_net_savings_brl: float
+    payback_years: float | None
+    coverage_pct: float
+    reducao_exposicao_pct: float
+    deficit_mwh_sem_bess: float
+    deficit_mwh_com_bess: float
+    net_balance_sem_bess_brl: float
+    """Annual signed net balance without BESS: sum((gen - gf) × PLD).
+
+    Positive = annual solar surplus revenue; negative = net annual exposure.
+    Captures the fact that daytime surplus partially offsets nighttime deficit.
+    """
+    net_balance_com_bess_brl: float
+    """Annual signed net balance with BESS: sum((grid_injection - gf) × PLD).
+
+    Reflects the BESS impact on the net position (discharge adds to injection
+    in expensive hours; useful-solar charging reduces injection in cheap hours).
+    """
+    net_balance_daily_sem_bess_brl: float
+    """Mean daily signed net balance without BESS (net_balance_sem / 365)."""
+    net_balance_daily_com_bess_brl: float
+    """Mean daily signed net balance with BESS (net_balance_com / 365)."""
 
 
-def compute_scenario_result(
-    bess_cfg: BESSConfig,
-    dispatch: DispatchResult,
-    prices: PriceProfile,
-    params: SimulationParams,
-) -> ScenarioResult:
-    """Compute all scalar metrics for one scenario.
+def payback_display(result: ScenarioResult) -> str:
+    """Return display string for payback years.
 
     Parameters
     ----------
-    bess_cfg : BESSConfig
-        BESS configuration.
-    dispatch : DispatchResult
-        Hour-by-hour dispatch results.
+    result : ScenarioResult
+        Scenario result.
+
+    Returns
+    -------
+    str
+        Formatted payback or "não atingível".
+    """
+    if result.payback_years is None:
+        return PAYBACK_NOT_ACHIEVABLE
+    return f"{result.payback_years:.1f}"
+
+
+def compute_scenario_economics(
+    solar: SolarProfile,
+    prices: PriceProfile,
+    scenario: ScenarioDefinition,
+    dispatch: DispatchResult,
+    params: SimulationParams,
+) -> ScenarioResult:
+    """Compute all economic metrics for one scenario.
+
+    Parameters
+    ----------
+    solar : SolarProfile
+        Solar generation profile.
     prices : PriceProfile
         Hourly price profile.
+    scenario : ScenarioDefinition
+        Scenario sizing and peak hours.
+    dispatch : DispatchResult
+        Hour-by-hour dispatch results.
     params : SimulationParams
         Simulation parameters.
 
@@ -195,105 +146,185 @@ def compute_scenario_result(
     ScenarioResult
         Complete scenario metrics.
     """
-    rte = params.rte_pct / 100.0
+    gf = solar.garantia_fisica_mw
+    price_arr = prices.prices_brl_per_mwh
 
-    curtail_without = float(np.sum(dispatch.curtailment_without_bess_mwh))
-    curtail_with = float(np.sum(dispatch.curtailment_with_bess_mwh))
+    # Exposure without BESS: deficit (all hours) × PLD
+    exposure_without = float(np.sum(dispatch.deficit_mwh * price_arr))
+    # Exposure with BESS: residual deficit (all hours) × PLD
+    exposure_with = float(np.sum(dispatch.residual_deficit_mwh * price_arr))
 
-    if curtail_without > 0:
-        avoided_pct = (1.0 - curtail_with / curtail_without) * 100.0
+    gross_savings = exposure_without - exposure_with
+    annual_o_and_m = scenario.capex_brl * params.bess_o_and_m_pct_capex
+    first_year_net_savings = gross_savings - annual_o_and_m
+    lifetime_net_savings, payback = _degraded_cashflow_payback(
+        capex_brl=scenario.capex_brl,
+        gross_savings_brl=gross_savings,
+        annual_o_and_m_brl=annual_o_and_m,
+        degradation_pct_yr=params.bess_degradation_pct_yr,
+        useful_life_years=params.useful_life_years,
+    )
+
+    # Coverage metrics (spec §6) — over all 8760 hours
+    deficit_mwh_sem_bess = float(np.sum(dispatch.deficit_mwh))
+    deficit_mwh_com_bess = float(np.sum(dispatch.residual_deficit_mwh))
+
+    if deficit_mwh_sem_bess > 0:
+        coverage = (1 - deficit_mwh_com_bess / deficit_mwh_sem_bess) * 100
     else:
-        avoided_pct = 0.0
+        coverage = 0.0
 
-    total_discharge_to_grid = float(np.sum(dispatch.discharge_mwh)) * rte
-    total_curtail_charged = float(np.sum(dispatch.charge_curtail_mwh))
-    total_grid_charged = float(np.sum(dispatch.charge_grid_mwh))
-
-    # Effective CF: BESS net contribution = discharge*rte - charge_grid
-    # Full plant CF (including solar base) is computed when the profile is available
-    # in the end-to-end wiring. Here we track the BESS delta.
-    grid_injection_mwh = max(total_discharge_to_grid - total_grid_charged, 0.0)
-    effective_cf = grid_injection_mwh / HOURS_PER_YEAR * 100.0
-
-    # Equivalent cycles
-    if bess_cfg.energy_capacity_mwh > 0:
-        equiv_cycles = float(np.sum(dispatch.discharge_mwh)) / bess_cfg.energy_capacity_mwh
+    if exposure_without > 0:
+        reducao_exposicao = (1 - exposure_with / exposure_without) * 100
     else:
-        equiv_cycles = 0.0
+        reducao_exposicao = 0.0
 
-    revenue = compute_incremental_revenue(dispatch, prices, params.rte_pct)
-    lcos = compute_lcos(bess_cfg, dispatch, params)
-    payback = compute_payback(bess_cfg.capex_brl, revenue)
+    # --- Net balance (signed position) ---
+    # Sem BESS: injection = gen - curtailment (all curtailment is lost)
+    # Com BESS: injection = gen - charge - curt_lost + discharge
+    #   (curtailment charge doesn't reduce grid injection; solar charge does)
+    gen_arr = solar.generation_mw
+    curt_total = dispatch.curtailment_mwh
+    curt_lost_arr = dispatch.curtailment_lost_mwh
 
-    # Top-up hour slots: convert hour indices to HH:00 strings
-    hour_of_day_set = sorted(set(h % 24 for h in dispatch.top_up_hours))
-    top_up_slots = [f"{hod:02d}:00" for hod in hour_of_day_set]
+    injection_sem = gen_arr - curt_total
+    injection_com = gen_arr - dispatch.charge_mwh - curt_lost_arr + dispatch.discharge_mwh
+
+    net_hourly_sem = (injection_sem - gf) * price_arr
+    net_hourly_com = (injection_com - gf) * price_arr
+
+    net_balance_sem = float(np.sum(net_hourly_sem))
+    net_balance_com = float(np.sum(net_hourly_com))
+
+    # Mean over 365 daily sums (same total, expressed as daily average)
+    net_daily_sem = float(net_hourly_sem.reshape(365, 24).sum(axis=1).mean())
+    net_daily_com = float(net_hourly_com.reshape(365, 24).sum(axis=1).mean())
 
     return ScenarioResult(
-        scenario_id=(bess_cfg.ilr, bess_cfg.bess_size_ratio_pct, bess_cfg.duration_h),
-        curtailment_without_bess_mwh_yr=curtail_without,
-        curtailment_with_bess_mwh_yr=curtail_with,
-        curtailment_avoided_pct=avoided_pct,
-        effective_cf_pct=effective_cf,
-        equivalent_cycles_yr=equiv_cycles,
-        incremental_revenue_brl_yr=revenue,
-        energy_from_curtail_mwh_yr=total_curtail_charged,
-        energy_from_grid_mwh_yr=total_grid_charged,
-        lcos_brl_per_mwh=lcos,
-        payback_yr=payback,
-        top_up_hour_slots=top_up_slots,
+        scenario=scenario,
+        dispatch=dispatch,
+        fc=solar.fc,
+        garantia_fisica_mw=gf,
+        bess_energy_mwh=scenario.bess_energy_mwh,
+        bess_power_mw=scenario.bess_power_mw,
+        capex_brl=scenario.capex_brl,
+        annual_exposure_without_bess_brl=exposure_without,
+        annual_exposure_with_bess_brl=exposure_with,
+        annual_savings_brl=first_year_net_savings,
+        annual_gross_savings_brl=gross_savings,
+        annual_o_and_m_brl=annual_o_and_m,
+        lifetime_net_savings_brl=lifetime_net_savings,
+        payback_years=payback,
+        coverage_pct=coverage,
+        reducao_exposicao_pct=reducao_exposicao,
+        deficit_mwh_sem_bess=deficit_mwh_sem_bess,
+        deficit_mwh_com_bess=deficit_mwh_com_bess,
+        net_balance_sem_bess_brl=net_balance_sem,
+        net_balance_com_bess_brl=net_balance_com,
+        net_balance_daily_sem_bess_brl=net_daily_sem,
+        net_balance_daily_com_bess_brl=net_daily_com,
     )
 
 
-def compute_payback_sensitivity(
-    base_result: ScenarioResult,
+def _degraded_cashflow_payback(
+    *,
+    capex_brl: float,
+    gross_savings_brl: float,
+    annual_o_and_m_brl: float,
+    degradation_pct_yr: float,
+    useful_life_years: int,
+) -> tuple[float, float | None]:
+    """Return lifetime net savings and simple payback with annual degradation."""
+    cumulative = 0.0
+    previous = 0.0
+    for year in range(1, useful_life_years + 1):
+        net = gross_savings_brl * ((1 - degradation_pct_yr) ** (year - 1)) - annual_o_and_m_brl
+        cumulative += net
+        if cumulative >= capex_brl:
+            if net <= 0:
+                return cumulative, float(year)
+            fraction = (capex_brl - previous) / net
+            return cumulative, (year - 1) + fraction
+        previous = cumulative
+    return cumulative, None
+
+
+def compute_all_scenarios(
+    solar: SolarProfile,
     prices: PriceProfile,
+    dispatch_pairs: list[tuple[ScenarioDefinition, DispatchResult]],
     params: SimulationParams,
-) -> np.ndarray:
-    """Compute payback sensitivity over 10×10 grid of price × CAPEX.
+) -> list[ScenarioResult]:
+    """Compute economics for all scenarios.
 
     Parameters
     ----------
-    base_result : ScenarioResult
-        Base scenario result.
+    solar : SolarProfile
+        Solar generation profile.
     prices : PriceProfile
-        Price profile (base price = mean of PLD array).
+        Hourly price profile.
+    dispatch_pairs : list[tuple[ScenarioDefinition, DispatchResult]]
+        Paired scenario definitions and dispatch results.
     params : SimulationParams
         Simulation parameters.
 
     Returns
     -------
-    np.ndarray
-        10×10 array of payback values (np.inf where not achievable).
+    list[ScenarioResult]
+        Economic results for each scenario.
     """
-    base_price = float(np.mean(prices.prices_brl_per_mwh))
-    base_capex = params.capex_usd_per_kwh
+    return [
+        compute_scenario_economics(solar, prices, scenario, dispatch, params)
+        for scenario, dispatch in dispatch_pairs
+    ]
 
-    price_factors = np.linspace(0.5, 1.5, 10)
-    capex_factors = np.linspace(0.5, 1.5, 10)
 
-    grid = np.full((10, 10), np.inf, dtype=np.float64)
+def build_top10_peak_hours(
+    results: list[ScenarioResult],
+    prices: PriceProfile,
+) -> pd.DataFrame:
+    """Build top-10 peak hours table by highest PLD.
 
-    # Base energy from curtailment (MWh) — used for revenue scaling
-    base_energy = base_result.energy_from_curtail_mwh_yr
-    rte = params.rte_pct / 100.0
+    Parameters
+    ----------
+    results : list[ScenarioResult]
+        Scenario results (must be 3).
+    prices : PriceProfile
+        Hourly price profile.
 
-    for i, pf in enumerate(price_factors):
-        for j, cf in enumerate(capex_factors):
-            adjusted_price = base_price * pf
-            adjusted_capex = base_capex * cf
-            revenue = base_energy * adjusted_price * rte
-            capex_brl = (
-                adjusted_capex
-                * params.usd_brl_rate
-                * base_result.scenario_id[1]  # bess_pct
-                / 100.0
-                * base_energy  # approximate sizing
-                * 1000  # MWh -> kWh
-            )
-            if revenue > 0 and capex_brl > 0:
-                grid[i, j] = capex_brl / revenue
-            else:
-                grid[i, j] = np.inf
+    Returns
+    -------
+    pd.DataFrame
+        10 rows with columns: hour_index, date, hour_of_day, pld_brl_per_mwh,
+        plus per-scenario dispatch_mwh and residual_deficit_mwh.
+    """
+    # Union of all peak hours across scenarios
+    all_peak_hours: set[int] = set()
+    for r in results:
+        all_peak_hours.update(r.scenario.peak_hours)
 
-    return grid
+    # Find peak hour indices (hours where hour_of_day is in the union)
+    peak_indices = [h for h in range(HOURS_PER_YEAR) if h % 24 in all_peak_hours]
+
+    # Sort by PLD descending, take top 10
+    peak_prices = prices.prices_brl_per_mwh[peak_indices]
+    top10_positions = np.argsort(peak_prices)[::-1][:10]
+    top10_hours = [peak_indices[p] for p in top10_positions]
+
+    rows = []
+    for h in top10_hours:
+        day = h // 24 + 1
+        hour_of_day = h % 24
+        row = {
+            "hour_index": h,
+            "date": f"Dia {day}",
+            "hour_of_day": hour_of_day,
+            "pld_brl_per_mwh": prices.prices_brl_per_mwh[h],
+        }
+        for r in results:
+            label = r.scenario.label
+            row[f"dispatch_mwh_{label}"] = r.dispatch.discharge_mwh[h]
+            row[f"residual_deficit_mwh_{label}"] = r.dispatch.residual_deficit_mwh[h]
+        rows.append(row)
+
+    return pd.DataFrame(rows)

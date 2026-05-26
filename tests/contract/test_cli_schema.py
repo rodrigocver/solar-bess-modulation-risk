@@ -1,14 +1,12 @@
-"""Contract tests for CLI schema per contracts/cli-schema.md.
+"""Contract tests for CLI schema v2 per contracts/cli-schema.md.
 
-Tests written FIRST (TDD) — must FAIL until cli.py is implemented.
-These tests verify the external CLI interface contract.
+Tests written FIRST (TDD) — verify the external CLI interface contract.
 """
 
 from __future__ import annotations
 
-import io
-import json
-import re
+import os
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,18 +14,8 @@ import numpy as np
 import pytest
 
 from solar_bess_risk.config import (
-    DEFAULT_BESS_SIZE_RATIOS_PCT,
-    DEFAULT_BQ_BILLING_PROJECT,
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BQ_YEAR,
-    DEFAULT_CAPEX_USD_PER_KWH,
-    DEFAULT_DEGRADATION_PCT_YR,
-    DEFAULT_DISCOUNT_RATE_PCT,
-    DEFAULT_ILR_VALUES,
-    DEFAULT_MIN_INJECTION_FLOOR_MW,
-    DEFAULT_MIN_SOC_THRESHOLD_PCT,
-    DEFAULT_RTE_PCT,
-    DEFAULT_STORAGE_DURATIONS_H,
     DEFAULT_USD_BRL_RATE,
     DEFAULT_USEFUL_LIFE_YR,
     HOURS_PER_YEAR,
@@ -35,84 +23,221 @@ from solar_bess_risk.config import (
 )
 
 
-class TestCT01DefaultValues:
-    """CT-01: Pressing Enter at every prompt produces exact default values."""
+@pytest.fixture
+def valid_csv(tmp_path) -> str:
+    """Create a valid 8760-row solar CSV."""
+    csv_path = tmp_path / "solar.csv"
+    values = np.random.uniform(0, 100, HOURS_PER_YEAR)
+    csv_path.write_text("\n".join(f"{v:.2f}" for v in values))
+    return str(csv_path)
 
-    def test_all_defaults_accepted(self):
+
+class TestCT01DefaultValues:
+    """CT-01: Enter at non-required prompts → defaults accepted."""
+
+    def test_all_defaults_accepted(self, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Simulate Enter at every prompt (empty strings)
-        inputs = [""] * 30  # more than enough Enter presses
+        # Sequence: curt, charge_mode, csv, mwac, submarket, usd, rte_path, life, om, deg
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
-            params = run_session()
+            params, curtailment, _, _ = run_session()
 
-        assert params.ilr_values == DEFAULT_ILR_VALUES
-        assert params.bess_size_ratios_pct == DEFAULT_BESS_SIZE_RATIOS_PCT
-        assert params.storage_durations_h == DEFAULT_STORAGE_DURATIONS_H
-        assert params.rte_pct == DEFAULT_RTE_PCT
-        assert params.degradation_pct_yr == DEFAULT_DEGRADATION_PCT_YR
-        assert params.capex_usd_per_kwh == DEFAULT_CAPEX_USD_PER_KWH
-        assert params.usd_brl_rate == DEFAULT_USD_BRL_RATE
-        assert params.useful_life_yr == DEFAULT_USEFUL_LIFE_YR
-        assert params.discount_rate_pct == DEFAULT_DISCOUNT_RATE_PCT
-        assert params.min_soc_threshold_pct == DEFAULT_MIN_SOC_THRESHOLD_PCT
-        assert params.min_injection_floor_mw == DEFAULT_MIN_INJECTION_FLOOR_MW
+        assert params.csv_path == valid_csv
+        assert params.mwac == 100.0
         assert params.bq_submarket == DEFAULT_BQ_SUBMARKET
         assert params.bq_year == DEFAULT_BQ_YEAR
-        assert params.bq_auth_method == "adc"
+        assert params.usd_brl_rate == DEFAULT_USD_BRL_RATE
+        assert params.useful_life_years == DEFAULT_USEFUL_LIFE_YR
+        assert curtailment is False
 
 
 class TestCT02OutOfBounds:
-    """CT-02: Out-of-bounds value triggers ERRO and re-prompts."""
+    """CT-02: Out-of-bounds value → ERRO message cites parameter, value, range; re-prompts."""
 
-    def test_out_of_bounds_rte_reprompts(self, capsys):
-        from solar_bess_risk.cli import prompt_float
+    def test_out_of_bounds_usd_brl_reprompts(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
 
-        # First give 150 (out of range), then give valid 85
-        inputs = iter(["150", "85"])
+        # Sequence: curt, charge_mode, CSV, MWac, submarket, usd=999(OOB), valid, rte_path, life, om, deg
+        inputs = ["", "", valid_csv, "100", "", "999", "5.7", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
-            val = prompt_float("Eficiência round-trip", "%", 85.0, 0.01, 100.0)
-        assert val == 85.0
+            params, _, _, _ = run_session()
+
+        assert params.usd_brl_rate == 5.7
         captured = capsys.readouterr()
         assert "ERRO" in captured.out
 
 
 class TestCT03NonNumeric:
-    """CT-03: Non-numeric value at float prompt triggers ERRO and re-prompts."""
+    """CT-03: Non-numeric value → ERRO + reprompt."""
 
-    def test_non_numeric_reprompts(self, capsys):
-        from solar_bess_risk.cli import prompt_float
+    def test_non_numeric_reprompts(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
 
-        inputs = iter(["abc", "85"])
+        # Sequence: curt, charge_mode, CSV, MWac=abc then 100, rest defaults
+        inputs = ["", "", valid_csv, "abc", "100", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
-            val = prompt_float("Eficiência round-trip", "%", 85.0, 0.01, 100.0)
-        assert val == 85.0
+            params, _, _, _ = run_session()
+
+        assert params.mwac == 100.0
         captured = capsys.readouterr()
         assert "ERRO" in captured.out
 
 
-class TestCT10CapexCurrencies:
-    """CT-10: Confirmation summary shows CAPEX in both USD/kWh and BRL/kWh."""
+class TestCT04WrongRowCount:
+    """CT-04: 8761-row solar CSV → rejected with message citing actual and expected count."""
 
-    def test_capex_dual_currency_in_summary(self):
-        from solar_bess_risk.cli import format_confirmation_summary
+    def test_wrong_row_count_rejected(self, capsys, tmp_path, valid_csv):
+        from solar_bess_risk.cli import run_session
 
-        params = SimulationParams()
-        summary = format_confirmation_summary(params)
-        assert "USD/kWh" in summary
-        assert "BRL/kWh" in summary
+        bad_csv = tmp_path / "bad.csv"
+        bad_csv.write_text("\n".join("1.0" for _ in range(8761)))
+
+        # Sequence: curt, charge_mode, bad CSV + mwac, re-prompt: valid CSV + mwac, then defaults
+        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        captured = capsys.readouterr()
+        assert "8761" in captured.out or "8.761" in captured.out
+        assert "8760" in captured.out or "8.760" in captured.out
 
 
-class TestCT15ServiceAccountAbsent:
-    """CT-15: Service account path absent from confirmation summary."""
+class TestCT05NegativeCSVValue:
+    """CT-05: Negative value in CSV → value is clamped to zero with a warning."""
 
-    def test_sa_path_not_in_summary(self):
-        from solar_bess_risk.cli import format_confirmation_summary
+    def test_negative_value_is_clamped(self, capsys, tmp_path):
+        from solar_bess_risk.cli import run_session
+
+        bad_csv = tmp_path / "neg.csv"
+        values = ["1.0"] * HOURS_PER_YEAR
+        values[42] = "-5.0"
+        bad_csv.write_text("\n".join(values))
+
+        # Sequence: curt, charge_mode, csv, mwac, then defaults
+        inputs = ["", "", str(bad_csv), "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        captured = capsys.readouterr()
+        assert params.csv_path == str(bad_csv)
+        assert "negativos" in captured.out.lower()
+        assert "zero" in captured.out.lower()
+
+
+class TestCT06NonNumericCSV:
+    """CT-06: Non-numeric value in CSV → ERRO cites row index and value."""
+
+    def test_non_numeric_csv_rejected(self, capsys, tmp_path, valid_csv):
+        from solar_bess_risk.cli import run_session
+
+        bad_csv = tmp_path / "nan.csv"
+        values = ["1.0"] * HOURS_PER_YEAR
+        values[10] = "hello"
+        bad_csv.write_text("\n".join(values))
+
+        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        captured = capsys.readouterr()
+        assert "ERRO" in captured.out
+
+
+class TestCT07MissingCSVPath:
+    """CT-07: Missing CSV path → run aborts with descriptive error."""
+
+    def test_nonexistent_csv_reprompts(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
+
+        # Sequence: curt, charge_mode, bad path, then valid csv+mwac, then defaults
+        inputs = ["", "", "/nonexistent/file.csv", valid_csv, "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        captured = capsys.readouterr()
+        assert "ERRO" in captured.out
+
+
+class TestCT08BQAuthFailure:
+    """CT-08: BQ auth failure → DataSourceError propagates, run aborts."""
+
+    def test_bq_auth_failure_raises(self):
+        from solar_bess_risk.data_sources import DataSourceError, fetch_price_bigquery
 
         params = SimulationParams(
-            bq_auth_method="service_account",
-            bq_service_account_path="/secret/key.json",
+            csv_path="/tmp/test.csv",
+            mwac=100.0,
+            bq_service_account_path="/nonexistent/key.json",
         )
-        summary = format_confirmation_summary(params)
-        assert "/secret/key.json" not in summary
-        assert "service_account_path" not in summary.lower()
+        with pytest.raises(DataSourceError):
+            fetch_price_bigquery(params)
+
+
+class TestCT09BQWrongRowCount:
+    """CT-09: BQ returns ≠ 8760 rows → aborts with actual vs expected count."""
+
+    def test_bq_wrong_row_count(self):
+        from solar_bess_risk.data_sources import DataSourceError, fetch_price_bigquery
+
+        params = SimulationParams(csv_path="/tmp/test.csv", mwac=100.0)
+
+        # Mock BQ returning wrong number of rows
+        mock_rows = [{"pld": 100.0, "datetime": "2025-01-01T00:00:00"}] * 100
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
+            with pytest.raises(DataSourceError, match="8760|8.760"):
+                fetch_price_bigquery(params)
+
+
+class TestCT10MWacNonPositive:
+    """CT-10: MWac ≤ 0 → rejected with ERRO + reprompt."""
+
+    def test_zero_mwac_rejected(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
+
+        # Sequence: curt, charge_mode, csv, mwac=0, mwac=-5, mwac=100, then defaults
+        inputs = ["", "", valid_csv, "0", "-5", "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        assert params.mwac == 100.0
+        captured = capsys.readouterr()
+        assert "ERRO" in captured.out
+
+
+class TestCT11ConfirmationSummary:
+    """CT-11: Confirmation summary shows fc and garantia_fisica_mw."""
+
+    def test_summary_shows_fc_and_gf(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
+
+        # Sequence: curt, charge_mode, csv, mwac, then defaults
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session()
+
+        captured = capsys.readouterr()
+        # Summary should mention fc and garantia física
+        assert "fc" in captured.out.lower() or "fator" in captured.out.lower()
+        assert "garantia" in captured.out.lower()
+
+
+class TestCT12ServiceAccountAbsent:
+    """CT-12: bq_service_account_path absent from confirmation summary and manifest."""
+
+    def test_sa_path_not_in_summary(self, capsys, valid_csv):
+        from solar_bess_risk.cli import run_session
+
+        # Sequence: curt, charge_mode, csv, mwac, then defaults
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", ""]
+        with patch("builtins.input", side_effect=inputs):
+            params, _, _, _ = run_session(service_account_path="/secret/key.json")
+
+        captured = capsys.readouterr()
+        assert "/secret/key.json" not in captured.out
+        assert "service_account_path" not in captured.out.lower()

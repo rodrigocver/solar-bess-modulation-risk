@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(///wsl.localhost/debian/home/cver/projects/**)",
+      "Bash(dir \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\debian\\\\\\\\home\\\\\\\\cver\\\\\\\\projects\\\\\\\\solar-bess-modulation-risk\\\\\\\\\")",
+      "Bash(find \"//wsl.localhost/debian/home/cver/projects/solar-bess-modulation-risk/solar_bess_risk\" -name \"*.py\" 2>/dev/null | head -30)",
+      "Bash(python -m pytest tests/unit/test_simulation.py tests/unit/test_economics.py tests/integration/test_full_run.py::TestFullRun::test_builds_backtest_html_report_with_submarket_and_rte_metadata -x -q)",
+      "Bash(wsl -d debian -e bash -c \"cd /home/cver/projects/solar-bess-modulation-risk && python -m pytest tests/unit/test_simulation.py tests/unit/test_economics.py tests/integration/test_full_run.py::TestFullRun::test_builds_backtest_html_report_with_submarket_and_rte_metadata -x -q 2>&1 | tail -30\")",
+      "Bash(uv run *)",
+      "Bash(python -m solar_bess_risk --quick-test)",
+      "Bash(python -m pytest tests/unit/test_simulation.py -v)",
+      "Bash(.venv/bin/python3.11 -m pytest tests/unit/test_simulation.py -v)",
+      "Bash(python3 -c \"import solar_bess_risk; print\\('ok'\\)\")"
+    ]
+  }
+}

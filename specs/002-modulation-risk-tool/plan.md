@@ -7,13 +7,15 @@
 ## Summary
 
 A command-line Python tool that simulates a solar+BESS plant hour-by-hour across 3 fixed
-scenarios (A/B/C) and delivers a single self-contained HTML report with four Plotly-based
+scenarios (A/B/C) and delivers a single self-contained HTML report with three Plotly-based
 interactive charts and a full economic summary table. The physical guarantee (garantia
 física) is derived from the engineer-supplied solar CSV and MWac; it is NOT an input
 parameter. BESS charging occurs only from solar excess above garantia física; BESS
-discharging occurs only during peak hours ({18,19} / {17,18,19} / {17,18,19,20}) to cover
-deficit below garantia física. Economic outputs — exposure without/with BESS, savings,
-payback, coverage — are in BRL using a configurable USD/BRL exchange rate for CAPEX.
+discharging occurs only during the requested guarantee windows (18:00-20:00 /
+17:00-20:00 / 17:00-21:00) to cover deficit below garantia física. Economic outputs —
+exposure without/with BESS, savings, payback, coverage — are in BRL using a configurable
+USD/BRL exchange rate for CAPEX, configurable round-trip efficiency (`rte`, default 0.85),
+1.5% annual O&M over CAPEX, and 2% annual degradation by default.
 
 ## Technical Context
 
@@ -22,7 +24,7 @@ payback, coverage — are in BRL using a configurable USD/BRL exchange rate for 
 **Primary Dependencies**:
 - `numpy` ≥ 1.26 — vectorised hourly simulation arrays
 - `pandas` ≥ 2.1 — CSV I/O, hourly time-series indexing
-- `plotly` ≥ 5.20 — four interactive charts + self-contained HTML export (`include_plotlyjs="inline"`)
+- `plotly` ≥ 5.20 — three interactive charts + self-contained HTML export (`include_plotlyjs="inline"`)
 - `google-cloud-bigquery` ≥ 3.10 — real hourly PLD price data from CCEE table; mandatory (run aborts on unavailability)
 - `pytest` ≥ 8.0 + `pytest-cov` — TDD test suite
 - `hashlib`, `json`, `pathlib` — stdlib; run manifest, SHA-256 input hash, run-ID
@@ -51,7 +53,7 @@ payback, coverage — are in BRL using a configurable USD/BRL exchange rate for 
 - [x] **III. Test-First** — TDD enforced: failing tests written before dispatch, economics, and profile code. Reference-case tests for exposure, payback, and coverage formulas.
 - [x] **IV. Reproducible Results** — JSON manifest written per run: tool version, ISO 8601 timestamp, SHA-256 of serialised parameter set, profile source (CSV filename), fc, garantia_fisica_mw, scenario definitions.
 - [x] **V. Modular Python Architecture** — No module > 400 lines; public functions have PEP 484 type annotations with unit suffixes; constants in `config.py`; no circular imports.
-- [x] **VI. Engineering-Quality Visualizations** — All four Plotly charts: title, axis labels with units, legend; hover tooltips with value + unit.
+- [x] **VI. Engineering-Quality Visualizations** — All three Plotly charts: title, axis labels with units, legend; hover tooltips with value + unit.
 - [x] **VII. SI Units & Brazilian Sector Conventions** — Power: MW; energy: MWh; currency: BRL/yr; CAPEX: USD/kWh → BRL via exchange rate. Unit labels on every output.
 
 **Gate result**: ✅ PASS
@@ -101,7 +103,7 @@ class SimulationParams:
     capex_usd_per_kwh: float = 200.0
     usd_brl_rate: float = 5.0
     useful_life_years: int = 20
-    discount_rate_pct: float = 10.0
+    rte: float = 0.85           # round-trip efficiency for h-rule check
     bq_service_account_path: str | None = None  # excluded from SHA-256
 
 @dataclass
@@ -157,24 +159,29 @@ class ScenarioResult:
 
 | Label | peak_hours         | duration_h |
 |-------|--------------------|------------|
-| A     | {18, 19}           | 2          |
-| B     | {17, 18, 19}       | 3          |
-| C     | {17, 18, 19, 20}   | 4          |
+| A     | {18: 1.0, 19: 1.0}                    | 2          |
+| B     | {17: 1.0, 18: 1.0, 19: 1.0} | 3          |
+| C     | {17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0} | 4 |
 
 For each: `bess_power_mw = garantia_fisica_mw`, `bess_energy_mwh = garantia_fisica_mw × duration_h`
 
 ### Dispatch Rules (per FR-006)
 
+**Pre-computation per scenario**: `min_PLD_peak = min(prices[h] for h where h%24 IN peak_hours)`
+
 **Each hour h (0..8759)**:
 - `hour_of_day = h % 24`
 - If `generation_h > garantia_fisica_mw` and `hour_of_day NOT in peak_hours`:
   - `excess_h = generation_h − garantia_fisica_mw`
-  - `charge_h = min(excess_h, bess_power_mw, bess_energy_mwh − soc_h)`
-  - `soc_{h+1} = soc_h + charge_h`
-  - `grid_injection_h = generation_h − charge_h`
+  - h-rule: if `rte × min_PLD_peak > prices[h]`:
+    - `charge_h = min(excess_h, bess_energy_mwh − soc_h)`  *(no bess_power_mw cap on charge)*
+    - `soc_{h+1} = soc_h + charge_h`
+    - `grid_injection_h = generation_h − charge_h`
+  - else (h-rule fails — sell excess directly):
+    - `charge_h = 0`; `soc_{h+1} = soc_h`; `grid_injection_h = generation_h`
 - Elif `hour_of_day IN peak_hours`:
   - `deficit_h = max(0, garantia_fisica_mw − generation_h)`
-  - `dispatch_h = min(deficit_h, bess_power_mw, soc_h)`
+  - `dispatch_h = min(deficit_h, bess_power_mw, soc_h)`  *(discharge still capped by bess_power_mw)*
   - `residual_deficit_h = deficit_h − dispatch_h`
   - `soc_{h+1} = soc_h − dispatch_h`
   - `grid_injection_h = generation_h + dispatch_h`
@@ -187,8 +194,8 @@ For each: `bess_power_mw = garantia_fisica_mw`, `bess_energy_mwh = garantia_fisi
 ### Economic Formulas (per FR-007, FR-008)
 
 ```
-annual_exposure_without_bess = Σ(garantia_fisica_mw × PLD_h)  for h where h%24 in peak_hours
-annual_exposure_with_bess    = Σ(residual_deficit_h × PLD_h)   for h where h%24 in peak_hours
+annual_exposure_without_bess = Σ(deficit_h × PLD_h)            for h in the guarantee window
+annual_exposure_with_bess    = Σ(residual_deficit_h × PLD_h)   for h in the guarantee window
 annual_savings               = exposure_without − exposure_with
 payback_years                = capex_brl / annual_savings       (None if annual_savings ≤ 0)
 coverage_pct                 = (1 − exposure_with/exposure_without) × 100

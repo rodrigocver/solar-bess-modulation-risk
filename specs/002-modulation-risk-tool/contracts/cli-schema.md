@@ -87,9 +87,9 @@ On invalid input, display error then repeat the same prompt:
 
 | ID | Label (PT-BR) | Unit | Default | Bounds | Param field |
 |----|--------------|------|---------|--------|-------------|
-| P-06 | `CAPEX do BESS` | USD/kWh | `250.0` | (0, 2000] | `capex_usd_per_kwh` |
+| P-06 | `CAPEX do BESS` | USD/kWh | `200.0` | (0, 2000] | `capex_usd_per_kwh` |
 | P-07 | `Taxa de câmbio USD/BRL` | BRL/USD | `5.0` | (0, 20] | `usd_brl_rate` |
-| P-08 | `Vida útil` | anos | `15` | [1, 30] | `useful_life_yr` |
+| P-08 | `Vida útil` | anos | `20` | [1, 30] | `useful_life_yr` |
 | P-09 | `Taxa de desconto` | %/ano | `10.0` | [0, 50] | `discount_rate_pct` |
 
 ### Section 3 — Dispatch Strategy Parameters
@@ -195,8 +195,8 @@ Parâmetros aceitos:
   Storage durations (h):   2.0
   Round-trip efficiency:   85.0 %
   Annual degradation:      2.0 %/ano
-  BESS CAPEX:              250.0 USD/kWh  →  1.250,0 BRL/kWh (câmbio 5.0)
-  Useful life:             15 anos
+  BESS CAPEX:              200.0 USD/kWh  →  1.000,0 BRL/kWh (câmbio 5.0)
+  Useful life:             20 anos
   Discount rate:           10.0 %/ano
   Preço de energia:          BigQuery PLD {submarket} {year} | média={mean:.2f} BRL/MWh
   Min SoC threshold:       80.0 %

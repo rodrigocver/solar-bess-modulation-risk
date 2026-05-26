@@ -4,19 +4,17 @@ Functions
 ---------
 generate_run_id() -> str
 hash_params(params) -> str
-write_manifest(manifest, results, output_dir) -> Path
+write_manifest(manifest, output_dir) -> Path
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-from solar_bess_risk import __version__
 
 if TYPE_CHECKING:
     from solar_bess_risk.config import SimulationParams
@@ -29,31 +27,40 @@ class RunManifest:
     Parameters
     ----------
     tool_version : str
-        Semantic version string (e.g. ``"1.0.0"``).
+        Semantic version string (e.g. ``"2.0.0"``).
     run_id : str
         ``YYYYMMDD-HHMMSS-<sha256[:7]>``.
     timestamp_iso8601 : str
         ISO 8601 timestamp with timezone.
     params_sha256 : str
         Full 64-char SHA-256 hex of serialised parameters.
-    rng_seed : int
-        RNG seed used.
     profile_source : str
-        ``"synthetic"`` or CSV filename.
+        CSV filename (basename).
     price_source : str
         ``"bigquery_pld_{submarket}_{year}"``.
-    scenario_top_up_hours : dict[str, list[str]]
-        Per-scenario top-up slots keyed by ``"{ilr}_{bess_pct}_{dur_h}"``.
+    fc : float
+        Capacity factor derived from CSV.
+    garantia_fisica_mw : float
+        Physical guarantee in MW.
+    scenarios : list[dict]
+        3 entries with label, peak_hours, duration_h, bess_power_mw, bess_energy_mwh, capex_brl.
     """
 
     tool_version: str
     run_id: str
     timestamp_iso8601: str
     params_sha256: str
-    rng_seed: int
     profile_source: str
     price_source: str
-    scenario_top_up_hours: dict[str, list[str]]
+    fc: float
+    garantia_fisica_mw: float
+    scenarios: list[dict]
+    params: dict | None = None
+    price_sources_by_year: dict[str, str] | None = None
+    backtest_years: list[int] | None = None
+    acumulado_years: list[int] | None = None
+    curtailment: dict | None = None
+    rte: dict | None = None
 
 
 def generate_run_id() -> str:
@@ -66,7 +73,6 @@ def generate_run_id() -> str:
     """
     now = datetime.now(timezone.utc)
     ts = now.strftime("%Y%m%d-%H%M%S")
-    # Use timestamp bytes for a short deterministic hex suffix
     raw = now.isoformat().encode("utf-8")
     hex7 = hashlib.sha256(raw).hexdigest()[:7]
     return f"{ts}-{hex7}"
@@ -75,7 +81,8 @@ def generate_run_id() -> str:
 def hash_params(params: SimulationParams) -> str:
     """Compute SHA-256 of the serialised parameter set.
 
-    The ``bq_service_account_path`` field is excluded for security.
+    The ``bq_service_account_path`` field is excluded entirely — it is
+    never serialised.
 
     Parameters
     ----------
@@ -93,49 +100,21 @@ def hash_params(params: SimulationParams) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def write_manifest(
-    manifest: RunManifest,
-    results: list,
-    output_dir: Path,
-) -> Path:
+def write_manifest(manifest: RunManifest, output_dir: Path) -> Path:
     """Write the run manifest JSON to ``output_dir/manifest.json``.
-
-    If *results* is non-empty and each element has ``top_up_hour_slots`` and
-    a ``scenario_id`` attribute, the ``scenario_top_up_hours`` field is
-    populated from the results.
 
     Parameters
     ----------
     manifest : RunManifest
         Populated manifest dataclass.
-    results : list
-        List of ScenarioResult (or empty).
     output_dir : Path
-        Directory to write ``manifest.json`` into.
+        Directory to write ``manifest.json`` into (created if missing).
 
     Returns
     -------
     Path
         Path to the written ``manifest.json``.
     """
-    # Populate top-up hours from results if available
-    if results and hasattr(results[0], "scenario_id"):
-        top_up: dict[str, list[str]] = {}
-        for r in results:
-            ilr, bess_pct, dur_h = r.scenario_id
-            key = f"{ilr}_{bess_pct}_{dur_h}"
-            top_up[key] = list(getattr(r, "top_up_hour_slots", []))
-        manifest = RunManifest(
-            tool_version=manifest.tool_version,
-            run_id=manifest.run_id,
-            timestamp_iso8601=manifest.timestamp_iso8601,
-            params_sha256=manifest.params_sha256,
-            rng_seed=manifest.rng_seed,
-            profile_source=manifest.profile_source,
-            price_source=manifest.price_source,
-            scenario_top_up_hours=top_up,
-        )
-
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "manifest.json"
     data = asdict(manifest)

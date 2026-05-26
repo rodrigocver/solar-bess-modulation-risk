@@ -1,137 +1,144 @@
-"""Unit tests for solar_bess_risk.data_sources module.
-
-Tests written FIRST (TDD) — must FAIL until data_sources.py is implemented.
-"""
+"""Unit tests for solar_bess_risk.data_sources — BigQuery PLD price fetcher (v2)."""
 
 from __future__ import annotations
 
-import sys
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
 from solar_bess_risk.config import HOURS_PER_YEAR, SimulationParams
+from solar_bess_risk.data_sources import DataSourceError, PriceProfile
 
 
-def _setup_mock_bq(mock_bq_module, n_rows=HOURS_PER_YEAR, price=220.0, query_error=None, client_error=None):
-    """Configure a mock google.cloud.bigquery module and return mock client."""
-    if client_error:
-        mock_bq_module.Client.side_effect = client_error
-        return None
-
-    mock_client = MagicMock()
-    mock_bq_module.Client.return_value = mock_client
-
-    if query_error:
-        mock_client.query.side_effect = query_error
-        return mock_client
-
-    mock_result = MagicMock()
-    mock_result.__iter__ = MagicMock(
-        return_value=iter([{"pld_brl_per_mwh": price}] * n_rows)
+@pytest.fixture
+def params() -> SimulationParams:
+    return SimulationParams(
+        csv_path="/tmp/test.csv",
+        mwac=100.0,
+        bq_year=2025,
+        bq_submarket="SE",
     )
-    mock_result.__len__ = MagicMock(return_value=n_rows)
-    mock_client.query.return_value = mock_result
-    # Also set up QueryJobConfig and ScalarQueryParameter
-    mock_bq_module.QueryJobConfig.return_value = MagicMock()
-    mock_bq_module.ScalarQueryParameter.return_value = MagicMock()
-    return mock_client
+
+
+def _mock_bq_rows(n: int = HOURS_PER_YEAR, price: float = 200.0):
+    """Create mock BigQuery result rows."""
+    start = datetime(2025, 1, 1)
+    return [
+        {"pld": price, "datetime": (start + timedelta(hours=i)).isoformat()}
+        for i in range(n)
+    ]
 
 
 class TestFetchPriceBigquery:
-    """BigQuery PLD price fetcher."""
+    """Tests for fetch_price_bigquery."""
 
-    def test_returns_price_profile(self):
-        from solar_bess_risk.data_sources import PriceProfile, fetch_price_bigquery
-
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq)
-
-        with patch.dict(sys.modules, {"google.cloud.bigquery": mock_bq, "google.cloud": MagicMock()}):
-            # Need to reload to pick up the mock
-            import importlib
-            import solar_bess_risk.data_sources as ds
-            # Patch the import inside the function
-            with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-                params = SimulationParams()
-                profile = fetch_price_bigquery(params)
-                assert isinstance(profile, PriceProfile)
-
-    def test_source_is_bigquery_pld(self):
+    def test_returns_price_profile_with_correct_source(self, params):
         from solar_bess_risk.data_sources import fetch_price_bigquery
 
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq)
+        mock_rows = _mock_bq_rows(HOURS_PER_YEAR, 200.0)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
 
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
-            profile = fetch_price_bigquery(params)
-            assert profile.source == "bigquery_pld"
+            result = fetch_price_bigquery(params)
 
-    def test_prices_length_8760(self):
+        assert isinstance(result, PriceProfile)
+        assert result.source == "bigquery_pld_SE_2025"
+
+    def test_returns_8760_prices(self, params):
         from solar_bess_risk.data_sources import fetch_price_bigquery
 
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq)
+        mock_rows = _mock_bq_rows(HOURS_PER_YEAR, 150.0)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
 
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
-            profile = fetch_price_bigquery(params)
-            assert len(profile.prices_brl_per_mwh) == HOURS_PER_YEAR
+            result = fetch_price_bigquery(params)
 
-    def test_all_prices_non_negative(self):
+        assert len(result.prices_brl_per_mwh) == HOURS_PER_YEAR
+
+    def test_all_prices_non_negative(self, params):
         from solar_bess_risk.data_sources import fetch_price_bigquery
 
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq, price=150.0)
+        mock_rows = _mock_bq_rows(HOURS_PER_YEAR, 100.0)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
 
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
-            profile = fetch_price_bigquery(params)
-            assert np.all(profile.prices_brl_per_mwh >= 0)
+            result = fetch_price_bigquery(params)
 
-    def test_submarket_and_year_populated(self):
+        assert np.all(result.prices_brl_per_mwh >= 0)
+
+    def test_auth_failure_raises_datasource_error(self, params):
         from solar_bess_risk.data_sources import fetch_price_bigquery
 
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_bq.return_value.Client.side_effect = Exception("Auth failed")
 
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams(bq_submarket="NE", bq_year=2024)
-            profile = fetch_price_bigquery(params)
-            assert profile.bq_submarket == "NE"
-            assert profile.bq_year == 2024
-
-    def test_auth_error_raises_datasource_error(self):
-        from solar_bess_risk.data_sources import DataSourceError, fetch_price_bigquery
-
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq, client_error=Exception("Authentication failed"))
-
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
             with pytest.raises(DataSourceError):
                 fetch_price_bigquery(params)
 
-    def test_row_count_mismatch_raises_datasource_error(self):
-        from solar_bess_risk.data_sources import DataSourceError, fetch_price_bigquery
+    def test_network_error_raises_datasource_error(self, params):
+        from solar_bess_risk.data_sources import fetch_price_bigquery
 
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq, n_rows=100, price=220.0)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.side_effect = Exception("Network error")
 
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
-            with pytest.raises(DataSourceError, match="8.760"):
-                fetch_price_bigquery(params)
-
-    def test_network_error_raises_datasource_error(self):
-        from solar_bess_risk.data_sources import DataSourceError, fetch_price_bigquery
-
-        mock_bq = MagicMock()
-        _setup_mock_bq(mock_bq, query_error=Exception("Network unreachable"))
-
-        with patch("solar_bess_risk.data_sources._get_bigquery_module", return_value=mock_bq):
-            params = SimulationParams()
             with pytest.raises(DataSourceError):
                 fetch_price_bigquery(params)
+
+    def test_wrong_row_count_raises_datasource_error(self, params):
+        from solar_bess_risk.data_sources import fetch_price_bigquery
+
+        mock_rows = _mock_bq_rows(100, 200.0)  # Only 100 rows
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
+
+            with pytest.raises(DataSourceError, match="8760|8.760"):
+                fetch_price_bigquery(params)
+
+    def test_deterministic_price_arrays(self, params):
+        from solar_bess_risk.data_sources import fetch_price_bigquery
+
+        mock_rows = _mock_bq_rows(HOURS_PER_YEAR, 250.0)
+        with patch("solar_bess_risk.data_sources._get_bigquery_module") as mock_bq:
+            mock_client = MagicMock()
+            mock_bq.return_value.Client.return_value = mock_client
+            mock_bq.return_value.QueryJobConfig = MagicMock
+            mock_bq.return_value.ScalarQueryParameter = MagicMock
+            mock_client.query.return_value = mock_rows
+
+            r1 = fetch_price_bigquery(params)
+            r2 = fetch_price_bigquery(params)
+
+        np.testing.assert_array_equal(r1.prices_brl_per_mwh, r2.prices_brl_per_mwh)
+
+
+def test_envision_rte_file_locks_block_and_pcs_metadata():
+    from solar_bess_risk.rte import get_rte_metadata
+
+    metadata = get_rte_metadata("dados/11 - Envision.xlsx")
+    assert metadata == {
+        "rte_source_file": "11 - Envision.xlsx",
+        "typical_block_mwh": 10.1,
+        "pcs_mva": 2.52,
+    }

@@ -1,252 +1,219 @@
-"""HTML report assembly: summary tables and self-contained HTML export.
+"""HTML report generator (v2).
 
 Functions
 ---------
-build_summary_table_html(results) -> str
-build_topup_summary_table_html(results, prices) -> str
-write_report(figures, table_html, topup_table_html, results, params, output_dir) -> Path
+build_summary_table_html(results, useful_life_years) -> str
+build_top10_table_html(df) -> str
+write_report(results, prices, params, solar, output_dir) -> str
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-import numpy as np
-import plotly.io as pio
+import pandas as pd
 
-from solar_bess_risk.config import (
-    LCOS_NOT_COMPUTABLE,
-    PAYBACK_NOT_ACHIEVABLE,
-    SimulationParams,
+from solar_bess_risk.config import HOURS_PER_YEAR, SimulationParams
+from solar_bess_risk.data_sources import PriceProfile
+from solar_bess_risk.economics import (
+    ScenarioResult,
+    build_top10_peak_hours,
+    payback_display,
 )
-from solar_bess_risk.economics import ScenarioResult
+from solar_bess_risk.profile import SolarProfile
+from solar_bess_risk.report_charts import (
+    build_capex_savings_bar_chart,
+    build_exposure_bar_chart,
+    build_payback_curve,
+)
 
-if TYPE_CHECKING:
-    import plotly.graph_objects as go
+PREMISSAS_HTML = """
+<section>
+<h2>Premissas Regulatórias</h2>
+<ul>
+<li><strong>Garantia Física:</strong> Calculada como FC × MWac, conforme Portaria MME 101/2016 (Seção III, Art. 3º) e Portaria MME 60/2020.</li>
+<li><strong>Módulo de Liquidação:</strong> Exposição calculada com base no PLD horário da CCEE (Módulo 03 - Regras de Comercialização).</li>
+<li><strong>Tratamento BESS:</strong> Armazenamento atrás do medidor, sem participação no ACL como gerador, conforme ANEEL RN 1.034/2022.</li>
+<li><strong>Cenários de ponta:</strong> Baseados em horários históricos de maior PLD no submercado SE.</li>
+</ul>
+</section>
+"""
 
-    from solar_bess_risk.data_sources import PriceProfile
 
-
-def build_summary_table_html(results: list[ScenarioResult]) -> str:
-    """Build 13-column HTML summary table.
+def build_summary_table_html(results: list[ScenarioResult], useful_life_years: int) -> str:
+    """Build HTML table summarizing scenario results.
 
     Parameters
     ----------
     results : list[ScenarioResult]
-        All scenario results.
+        Scenarios A, B, C results.
+    useful_life_years : int
+        Useful life in years.
 
     Returns
     -------
     str
         HTML table string.
     """
-    headers = [
-        "ILR",
-        "BESS (%)",
-        "Duração (h)",
-        "Curtailment s/ BESS (MWh/ano)",
-        "Curtailment c/ BESS (MWh/ano)",
-        "Curtailment Evitado (%)",
-        "CF Efetivo (%)",
-        "Ciclos Equivalentes/ano",
-        "Receita Incremental (BRL/ano)",
-        "Energia Curtailment (MWh/ano)",
-        "Energia Grid (MWh/ano)",
-        "LCOS (BRL/MWh)",
-        "Payback (anos)",
-    ]
-
-    rows = []
+    rows = ""
     for r in results:
-        ilr, bess_pct, dur_h = r.scenario_id
-        lcos_str = LCOS_NOT_COMPUTABLE if r.lcos_brl_per_mwh is None else f"{r.lcos_brl_per_mwh:,.2f}"
-        payback_str = PAYBACK_NOT_ACHIEVABLE if r.payback_yr is None else f"{r.payback_yr:,.1f}"
-        rows.append(
-            f"<tr>"
-            f"<td>{ilr}</td>"
-            f"<td>{bess_pct}</td>"
-            f"<td>{dur_h}</td>"
-            f"<td>{r.curtailment_without_bess_mwh_yr:,.1f}</td>"
-            f"<td>{r.curtailment_with_bess_mwh_yr:,.1f}</td>"
-            f"<td>{r.curtailment_avoided_pct:,.1f}</td>"
-            f"<td>{r.effective_cf_pct:,.2f}</td>"
-            f"<td>{r.equivalent_cycles_yr:,.1f}</td>"
-            f"<td>{r.incremental_revenue_brl_yr:,.2f}</td>"
-            f"<td>{r.energy_from_curtail_mwh_yr:,.1f}</td>"
-            f"<td>{r.energy_from_grid_mwh_yr:,.1f}</td>"
-            f"<td>{lcos_str}</td>"
-            f"<td>{payback_str}</td>"
-            f"</tr>"
-        )
+        rows += f"""<tr>
+<td>{r.scenario.label}</td>
+<td>{r.scenario.duration_h}h</td>
+<td>{r.bess_power_mw:.1f}</td>
+<td>{r.bess_energy_mwh:.1f}</td>
+<td>{r.capex_brl:,.0f}</td>
+<td>{r.annual_exposure_without_bess_brl:,.0f}</td>
+<td>{r.annual_exposure_with_bess_brl:,.0f}</td>
+<td>{r.annual_gross_savings_brl:,.0f}</td>
+<td>{r.annual_o_and_m_brl:,.0f}</td>
+<td>{r.annual_savings_brl:,.0f}</td>
+<td>{payback_display(r)}</td>
+<td>{r.coverage_pct:.1f}%</td>
+</tr>"""
 
-    header_html = "".join(f"<th>{h}</th>" for h in headers)
-    return (
-        '<table class="summary-table">'
-        f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody>"
-        "</table>"
-    )
+    return f"""<table>
+<thead><tr>
+<th>Cenário</th><th>Duração</th><th>Potência (MW)</th><th>Energia (MWh)</th>
+<th>CAPEX (BRL)</th><th>Exposição s/ BESS (BRL/ano)</th>
+<th>Exposição c/ BESS (BRL/ano)</th><th>Economia Bruta (BRL/ano)</th>
+<th>O&M (BRL/ano)</th><th>Economia Líquida Ano 1 (BRL/ano)</th>
+<th>Payback (anos)</th><th>Cobertura</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>"""
 
 
-def build_topup_summary_table_html(
+def build_top10_table_html(df: pd.DataFrame) -> str:
+    """Convert top-10 DataFrame to HTML table.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Top-10 peak hours table.
+
+    Returns
+    -------
+    str
+        HTML table string.
+    """
+    return df.to_html(index=False, float_format="{:.2f}".format)
+
+
+def write_report(
     results: list[ScenarioResult],
     prices: PriceProfile,
+    params: SimulationParams,
+    solar: SolarProfile,
+    output_dir: str | Path,
 ) -> str:
-    """Build top-up summary table: top-5 most frequent slots per scenario.
+    """Write full HTML report with charts, tables, and premissas.
 
     Parameters
     ----------
     results : list[ScenarioResult]
         All scenario results.
     prices : PriceProfile
-        Price profile for average PLD computation.
+        Price profile used.
+    params : SimulationParams
+        Simulation parameters.
+    solar : SolarProfile
+        Solar profile used.
+    output_dir : str | Path
+        Directory to write report.html.
 
     Returns
     -------
     str
-        HTML table string.
+        Path to written report.html.
     """
-    # Compute average PLD per hour-of-day
-    avg_pld_by_hour = np.zeros(24)
-    n_days = len(prices.prices_brl_per_mwh) // 24
-    for hod in range(24):
-        indices = np.arange(hod, len(prices.prices_brl_per_mwh), 24)
-        avg_pld_by_hour[hod] = float(np.mean(prices.prices_brl_per_mwh[indices]))
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    headers = ["ILR", "BESS (%)", "Duração (h)", "Top-Up Slots", "PLD Médio (BRL/MWh)"]
-    rows = []
-    for r in results:
-        ilr, bess_pct, dur_h = r.scenario_id
-        slots = r.top_up_hour_slots[:5]
-        if not slots:
-            rows.append(
-                f"<tr><td>{ilr}</td><td>{bess_pct}</td><td>{dur_h}</td>"
-                f"<td>—</td><td>—</td></tr>"
-            )
-            continue
-        slots_str = ", ".join(slots)
-        # Average PLD for those slots
-        slot_hours = [int(s.split(":")[0]) for s in slots]
-        avg_pld = float(np.mean([avg_pld_by_hour[h] for h in slot_hours]))
-        rows.append(
-            f"<tr><td>{ilr}</td><td>{bess_pct}</td><td>{dur_h}</td>"
-            f"<td>{slots_str}</td><td>{avg_pld:,.2f}</td></tr>"
-        )
-
-    header_html = "".join(f"<th>{h}</th>" for h in headers)
-    return (
-        '<table class="topup-table">'
-        f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody>"
-        "</table>"
+    # Build charts
+    fig_exposure = build_exposure_bar_chart(results)
+    fig_capex = build_capex_savings_bar_chart(results, params.useful_life_years)
+    fig_payback = build_payback_curve(
+        results,
+        params.useful_life_years,
+        params.bess_degradation_pct_yr,
     )
 
+    chart_exposure_html = fig_exposure.to_html(full_html=False, include_plotlyjs="inline")
+    chart_capex_html = fig_capex.to_html(full_html=False, include_plotlyjs=False)
+    chart_payback_html = fig_payback.to_html(full_html=False, include_plotlyjs=False)
 
-PREMISSAS_HTML = """
-<div class="premissas">
-<h2>Premissas e Limitações</h2>
-<ul>
-<li>Todos os resultados normalizados para 1 MWac de capacidade inversor.</li>
-<li>Perfil solar sintético gerado via pvlib (Ineichen clearsky) — não representa condições reais de um site específico.</li>
-<li>Preços PLD horários obtidos do BigQuery (CCEE/Infomercado).</li>
-<li>Despacho horário simplificado: carga prioritária de curtailment, descarga greedy, top-up opcional da rede.</li>
-<li>Degradação linear do BESS aplicada no cálculo do LCOS.</li>
-<li>CAPEX convertido de USD para BRL pela taxa de câmbio configurada.</li>
-<li>Sem modelagem de perdas de transmissão, O&M, ou impostos.</li>
-</ul>
-</div>
-"""
+    # Build tables
+    summary_html = build_summary_table_html(results, params.useful_life_years)
+    top10_df = build_top10_peak_hours(results, prices)
+    top10_html = build_top10_table_html(top10_df)
 
-
-def write_report(
-    figures: list[go.Figure],
-    table_html: str,
-    topup_table_html: str,
-    results: list[ScenarioResult],
-    params: SimulationParams,
-    output_dir: Path,
-) -> Path:
-    """Assemble and write self-contained HTML report.
-
-    Parameters
-    ----------
-    figures : list[go.Figure]
-        List of Plotly figures to embed.
-    table_html : str
-        Summary table HTML.
-    topup_table_html : str
-        Top-up summary table HTML.
-    results : list[ScenarioResult]
-        All scenario results.
-    params : SimulationParams
-        Simulation parameters.
-    output_dir : Path
-        Output directory path.
-
-    Returns
-    -------
-    Path
-        Path to the written HTML file.
-    """
-    output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / "report.html"
-
-    chart_divs = []
-    for fig in figures:
-        chart_divs.append(pio.to_html(fig, include_plotlyjs=False, full_html=False))
-
-    # Get plotly.js inline
-    import plotly.graph_objects as _go
-
-    plotly_js = pio.to_html(
-        _go.Figure(), include_plotlyjs=True, full_html=False
-    ).split("</script>")[0] + "</script>"
-
+    # Assemble report
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<meta charset="utf-8">
-<title>Solar+BESS Modulation Risk Report</title>
-{plotly_js}
+<meta charset="UTF-8">
+<title>Análise de Risco de Modulação Solar + BESS</title>
 <style>
-body {{ font-family: Arial, sans-serif; margin: 20px; }}
-h1 {{ color: #2c3e50; }}
-h2 {{ color: #34495e; }}
-.summary-table, .topup-table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-.summary-table th, .summary-table td,
-.topup-table th, .topup-table td {{ border: 1px solid #ddd; padding: 8px; text-align: right; }}
-.summary-table th, .topup-table th {{ background-color: #2c3e50; color: white; }}
-.summary-table tr:nth-child(even), .topup-table tr:nth-child(even) {{ background-color: #f2f2f2; }}
-.premissas {{ background-color: #fef9e7; padding: 15px; border-left: 4px solid #f39c12; margin: 20px 0; }}
+body {{ font-family: 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+th, td {{ border: 1px solid #ddd; padding: 8px; text-align: right; }}
+th {{ background-color: #4CAF50; color: white; }}
+tr:nth-child(even) {{ background-color: #f2f2f2; }}
+h1, h2 {{ color: #333; }}
+section {{ margin: 24px 0; }}
 </style>
 </head>
 <body>
-<h1>Solar+BESS Modulation Risk Analysis</h1>
-<p>Normalizado para 1 MWac | ILRs: {params.ilr_values} | Durações: {params.storage_durations_h}h</p>
+<h1>Análise de Risco de Modulação Solar + BESS</h1>
 
-<h2>Curva de Saturação</h2>
-{chart_divs[0] if len(chart_divs) > 0 else ""}
-
-<h2>Heatmap de Despacho</h2>
-{chart_divs[1] if len(chart_divs) > 1 else ""}
-
-<h2>Sensibilidade do Payback</h2>
-{chart_divs[2] if len(chart_divs) > 2 else ""}
-
-<h2>Distribuição Horária</h2>
-{chart_divs[3] if len(chart_divs) > 3 else ""}
-
-<h2>Resumo dos Cenários</h2>
-{table_html}
-
-<h2>Resumo de Top-Up</h2>
-{topup_table_html}
+<section>
+<h2>Dados de Entrada</h2>
+<ul>
+<li><strong>Arquivo solar:</strong> {solar.csv_filename}</li>
+<li><strong>MWac:</strong> {params.mwac:.1f} MW</li>
+<li><strong>Fator de Capacidade:</strong> {solar.fc:.4f}</li>
+<li><strong>Garantia Física:</strong> {solar.garantia_fisica_mw:.2f} MW</li>
+<li><strong>Fonte de preço:</strong> {prices.source}</li>
+<li><strong>CAPEX:</strong> {params.capex_usd_per_kwh} USD/kWh × {params.usd_brl_rate} BRL/USD</li>
+<li><strong>Vida útil:</strong> {params.useful_life_years} anos</li>
+<li><strong>Eficiência BESS:</strong> {params.bess_roundtrip_efficiency:.1%}</li>
+<li><strong>O&M BESS:</strong> {params.bess_o_and_m_pct_capex:.1%} do CAPEX ao ano</li>
+<li><strong>Degradação BESS:</strong> {params.bess_degradation_pct_yr:.1%} ao ano</li>
+</ul>
+</section>
 
 {PREMISSAS_HTML}
+
+<section>
+<h2>Resumo dos Cenários</h2>
+{summary_html}
+</section>
+
+<section>
+<h2>Exposição Financeira</h2>
+{chart_exposure_html}
+</section>
+
+<section>
+<h2>CAPEX vs Economia</h2>
+{chart_capex_html}
+</section>
+
+<section>
+<h2>Curva de Payback</h2>
+{chart_payback_html}
+</section>
+
+<section>
+<h2>Top 10 Horas de Ponta (por PLD)</h2>
+{top10_html}
+</section>
 
 </body>
 </html>"""
 
+    report_path = output_dir / "report.html"
     report_path.write_text(html, encoding="utf-8")
-    return report_path
+    return str(report_path)

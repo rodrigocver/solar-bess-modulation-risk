@@ -6,8 +6,8 @@ No magic numbers anywhere else in the codebase.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
+from typing import NamedTuple
 
 
 # ---------------------------------------------------------------------------
@@ -15,69 +15,121 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 HOURS_PER_YEAR: int = 8760
-PLANT_CAPACITY_MWAC: float = 1.0  # normalisation basis — always 1.0 MWac
-GRID_FREQUENCY_HZ: int = 60  # Brazilian grid nominal frequency
+
+# ---------------------------------------------------------------------------
+# Scenario template definitions (A / B / C)
+# ---------------------------------------------------------------------------
+
+
+class ScenarioTemplate(NamedTuple):
+    """Static scenario definition — profile-dependent fields computed later."""
+
+    label: str
+    peak_hours: frozenset[int]
+    duration_h: int
+    peak_hour_weights: dict[int, float]
+
+
+SCENARIO_TEMPLATES: list[ScenarioTemplate] = [
+    ScenarioTemplate(
+        label="A",
+        peak_hours=frozenset({18, 19}),
+        duration_h=2,
+        peak_hour_weights={18: 1.0, 19: 1.0},
+    ),
+    ScenarioTemplate(
+        label="B",
+        peak_hours=frozenset({17, 18, 19, 20}),
+        duration_h=4,
+        peak_hour_weights={17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0},
+    ),
+]
+
+PEAK_HOURS_BY_LABEL: dict[str, frozenset[int]] = {
+    t.label: t.peak_hours for t in SCENARIO_TEMPLATES
+}
 
 # ---------------------------------------------------------------------------
 # Default parameter values
 # ---------------------------------------------------------------------------
 
-DEFAULT_ILR_VALUES: list[float] = [1.2, 1.3, 1.4, 1.5]
-DEFAULT_BESS_SIZE_RATIOS_PCT: list[float] = [
-    0, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100,
-]
-DEFAULT_STORAGE_DURATIONS_H: list[float] = [2.0]
-DEFAULT_RTE_PCT: float = 85.0
-DEFAULT_DEGRADATION_PCT_YR: float = 2.0
-DEFAULT_CAPEX_USD_PER_KWH: float = 250.0
-DEFAULT_USD_BRL_RATE: float = 5.0
-DEFAULT_USEFUL_LIFE_YR: int = 15
-DEFAULT_DISCOUNT_RATE_PCT: float = 10.0
-DEFAULT_MIN_SOC_THRESHOLD_PCT: float = 80.0
-DEFAULT_MIN_INJECTION_FLOOR_MW: float = 0.0
-DEFAULT_RNG_SEED: int = 42
-
-# Synthetic profile location — SE Brazil (Minas Gerais)
-DEFAULT_SYNTHETIC_LAT: float = -22.0
-DEFAULT_SYNTHETIC_LON: float = -45.0
-DEFAULT_SYNTHETIC_ALT_M: float = 800.0
-
-# BigQuery defaults
-DEFAULT_BQ_BILLING_PROJECT: str = "cver-solar"
-DEFAULT_BQ_SUBMARKET: str = "SE"
 DEFAULT_BQ_YEAR: int = 2025
-DEFAULT_BQ_AUTH_METHOD: str = "adc"
+DEFAULT_BQ_SUBMARKET: str = "SE"
+DEFAULT_CAPEX_USD_KWH: float = 200.0  # legacy — kept for backtest.py compat
+DEFAULT_USD_BRL_RATE: float = 5.0
+DEFAULT_USEFUL_LIFE_YR: int = 20
+DEFAULT_BESS_ROUNDTRIP_EFFICIENCY: float = 0.85
+DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.015
+DEFAULT_BESS_DEGRADATION_PCT_YR: float = 0.02
 
 # ---------------------------------------------------------------------------
-# Validation bounds — (min, max) inclusive unless noted
+# CAPEX fixo por duração (spec v2.0 — não é mais parâmetro do usuário)
 # ---------------------------------------------------------------------------
 
-BOUNDS_ILR: tuple[float, float] = (1.0, 2.0)
-BOUNDS_BESS_SIZE_RATIO_PCT: tuple[float, float] = (0.0, 500.0)
-BOUNDS_STORAGE_DURATION_H: tuple[float, float] = (0.5, 8.0)
-BOUNDS_RTE_PCT: tuple[float, float] = (0.01, 100.0)  # (0, 100] — 0 excluded
-BOUNDS_DEGRADATION_PCT_YR: tuple[float, float] = (0.0, 10.0)
-BOUNDS_CAPEX_USD_PER_KWH: tuple[float, float] = (0.01, 2000.0)  # (0, 2000]
-BOUNDS_USD_BRL_RATE: tuple[float, float] = (0.01, 20.0)  # (0, 20]
-BOUNDS_USEFUL_LIFE_YR: tuple[int, int] = (1, 30)
-BOUNDS_DISCOUNT_RATE_PCT: tuple[float, float] = (0.0, 50.0)
-BOUNDS_MIN_SOC_THRESHOLD_PCT: tuple[float, float] = (0.0, 100.0)
-BOUNDS_MIN_INJECTION_FLOOR_MW: tuple[float, float] = (0.0, 1.0)
-BOUNDS_RNG_SEED: tuple[int, int] = (0, 2**32 - 1)
-BOUNDS_SYNTHETIC_LAT: tuple[float, float] = (-90.0, 90.0)
-BOUNDS_SYNTHETIC_LON: tuple[float, float] = (-180.0, 180.0)
-BOUNDS_SYNTHETIC_ALT_M: tuple[float, float] = (0.0, 5000.0)
-BOUNDS_BQ_YEAR: tuple[int, int] = (2021, 2040)
+CAPEX_USD_PER_KWH: dict[int, float] = {
+    2: 164.57,
+    4: 151.79,
+}
+
+# ---------------------------------------------------------------------------
+# BESS block sizing (typical module dimensions)
+# ---------------------------------------------------------------------------
+
+
+class BessBlockSpec(NamedTuple):
+    """Typical BESS module/block specification."""
+
+    duration_h: int
+    block_power_mw: float   # MVA (≈MW) per block
+    block_energy_mwh: float  # MWh per block
+
+
+BESS_BLOCK_SPECS: dict[int, BessBlockSpec] = {
+    2: BessBlockSpec(duration_h=2, block_power_mw=4.54, block_energy_mwh=10.1),
+    4: BessBlockSpec(duration_h=4, block_power_mw=2.52, block_energy_mwh=10.1),
+}
+
+# ---------------------------------------------------------------------------
+# Curtailment
+# ---------------------------------------------------------------------------
+
+DEFAULT_CURTAILMENT_PATH: str = "dados/media_agregada_horaria_2025_2026.xlsx"
+DEFAULT_RTE_PATH: str = "dados/11 - Envision.xlsx"
+DEFAULT_RTE_COMMISSIONING_YEAR: int = 2025
+CURTAILMENT_COLUMN: str = "Media Agregada Todas as Usinas"
+CURTAILMENT_SHEET_2025: str = "2025_horario"
+CURTAILMENT_SHEET_2026: str = "previsao_futura"
+
+# ---------------------------------------------------------------------------
+# Backtest years
+# ---------------------------------------------------------------------------
+
+BACKTEST_YEARS: list[int] = [2025, 2026]
+ACUMULADO_YEARS: list[int] = [2021, 2022, 2023, 2024, 2025, 2026]
+DURATIONS: list[int] = [2, 4]
+
+# ---------------------------------------------------------------------------
+# Validation bounds — (min, max) inclusive
+# ---------------------------------------------------------------------------
+
+PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "mwac": (0.01, 10_000.0),
+    "bq_year": (2000, 2100),
+    "capex_usd_per_kwh": (0.01, 5_000.0),
+    "usd_brl_rate": (0.01, 100.0),
+    "useful_life_years": (1, 100),
+    "bess_roundtrip_efficiency": (0.01, 1.0),
+    "bess_o_and_m_pct_capex": (0.0, 1.0),
+    "bess_degradation_pct_yr": (0.0, 1.0),
+}
 
 VALID_BQ_SUBMARKETS: set[str] = {"SE", "S", "NE", "N"}
-VALID_BQ_AUTH_METHODS: set[str] = {"adc", "service_account"}
 
 # ---------------------------------------------------------------------------
 # Display constants
 # ---------------------------------------------------------------------------
 
 PAYBACK_NOT_ACHIEVABLE: str = "não atingível"
-LCOS_NOT_COMPUTABLE: str = "não calculável"
 
 # ---------------------------------------------------------------------------
 # SimulationParams dataclass
@@ -90,86 +142,33 @@ class SimulationParams:
 
     Parameters
     ----------
-    plant_capacity_mwac : float
-        Normalisation basis; always 1.0 MWac.
-    ilr_values : list[float]
-        ILR scenarios to simulate.
-    bess_size_ratios_pct : list[float]
-        BESS energy sizing as % of annual solar energy without BESS.
-    storage_durations_h : list[float]
-        Storage duration(s) in hours.
-    rte_pct : float
-        Round-trip efficiency in %.
-    degradation_pct_yr : float
-        Annual capacity degradation in %/year.
-    capex_usd_per_kwh : float
-        BESS CAPEX in USD/kWh.
-    usd_brl_rate : float
-        Exchange rate BRL/USD.
-    useful_life_yr : int
-        Economic useful life in years.
-    discount_rate_pct : float
-        Discount rate in %/year.
-    min_soc_threshold_pct : float
-        End-of-day SoC threshold for grid top-up in % of capacity.
-    min_injection_floor_mw : float
-        Minimum net grid injection during top-up hours in MW.
-    rng_seed : int
-        Seed for any stochastic processes.
-    synthetic_profile_lat : float
-        Latitude for pvlib clearsky in degrees.
-    synthetic_profile_lon : float
-        Longitude for pvlib clearsky in degrees.
-    synthetic_profile_alt_m : float
-        Altitude for pvlib Ineichen in metres.
-    bq_billing_project : str
-        GCP billing project for BigQuery queries.
+    csv_path : str
+        Path to solar generation CSV (8,760 rows). Required.
+    mwac : float
+        Plant AC capacity in MW. Required.
+    bq_year : int
+        Year to fetch from CCEE PLD BigQuery table.
     bq_submarket : str
         CCEE submarket for PLD price fetch.
-    bq_year : int
-        Year to fetch from CCEE PLD table.
-    bq_auth_method : str
-        BigQuery authentication method ('adc' or 'service_account').
+    capex_usd_per_kwh : float
+        BESS capital cost in USD/kWh.
+    usd_brl_rate : float
+        Exchange rate BRL/USD.
+    useful_life_years : int
+        Economic useful life in years (undiscounted payback horizon).
     bq_service_account_path : str | None
-        Path to service account JSON key file; None when using ADC.
+        Path to service account JSON key; None when using ADC.
+        Excluded from SHA-256 hash and manifest.
     """
 
-    plant_capacity_mwac: float = PLANT_CAPACITY_MWAC
-    ilr_values: list[float] = field(default_factory=lambda: list(DEFAULT_ILR_VALUES))
-    bess_size_ratios_pct: list[float] = field(
-        default_factory=lambda: list(DEFAULT_BESS_SIZE_RATIOS_PCT)
-    )
-    storage_durations_h: list[float] = field(
-        default_factory=lambda: list(DEFAULT_STORAGE_DURATIONS_H)
-    )
-    rte_pct: float = DEFAULT_RTE_PCT
-    degradation_pct_yr: float = DEFAULT_DEGRADATION_PCT_YR
-    capex_usd_per_kwh: float = DEFAULT_CAPEX_USD_PER_KWH
-    usd_brl_rate: float = DEFAULT_USD_BRL_RATE
-    useful_life_yr: int = DEFAULT_USEFUL_LIFE_YR
-    discount_rate_pct: float = DEFAULT_DISCOUNT_RATE_PCT
-    min_soc_threshold_pct: float = DEFAULT_MIN_SOC_THRESHOLD_PCT
-    min_injection_floor_mw: float = DEFAULT_MIN_INJECTION_FLOOR_MW
-    rng_seed: int = DEFAULT_RNG_SEED
-    synthetic_profile_lat: float = DEFAULT_SYNTHETIC_LAT
-    synthetic_profile_lon: float = DEFAULT_SYNTHETIC_LON
-    synthetic_profile_alt_m: float = DEFAULT_SYNTHETIC_ALT_M
-    bq_billing_project: str = DEFAULT_BQ_BILLING_PROJECT
-    bq_submarket: str = DEFAULT_BQ_SUBMARKET
+    csv_path: str
+    mwac: float
     bq_year: int = DEFAULT_BQ_YEAR
-    bq_auth_method: Literal["adc", "service_account"] = DEFAULT_BQ_AUTH_METHOD
+    bq_submarket: str = DEFAULT_BQ_SUBMARKET
+    capex_usd_per_kwh: float = DEFAULT_CAPEX_USD_KWH
+    usd_brl_rate: float = DEFAULT_USD_BRL_RATE
+    useful_life_years: int = DEFAULT_USEFUL_LIFE_YR
+    bess_roundtrip_efficiency: float = DEFAULT_BESS_ROUNDTRIP_EFFICIENCY
+    bess_o_and_m_pct_capex: float = DEFAULT_BESS_O_AND_M_PCT_CAPEX
+    bess_degradation_pct_yr: float = DEFAULT_BESS_DEGRADATION_PCT_YR
     bq_service_account_path: str | None = None
-
-    @property
-    def capex_brl_per_kwh(self) -> float:
-        """CAPEX converted to BRL/kWh."""
-        return self.capex_usd_per_kwh * self.usd_brl_rate
-
-    @property
-    def total_scenarios(self) -> int:
-        """Total number of scenarios to simulate."""
-        return (
-            len(self.ilr_values)
-            * len(self.bess_size_ratios_pct)
-            * len(self.storage_durations_h)
-        )

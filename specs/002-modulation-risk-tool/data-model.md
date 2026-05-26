@@ -1,6 +1,10 @@
 # Data Model: Solar+BESS Modulation Risk Analysis Tool
 
-**Branch**: `002-modulation-risk-tool` | **Date**: 2026-05-15
+**Branch**: `002-modulation-risk-tool` | **Updated**: 2026-05-18 (v2 — Garantia Física Dispatch)
+
+> This document is the authoritative entity reference for the v2 model.
+> For implementation pseudocode and economic formulas see [plan.md](plan.md).
+> For requirements see [spec.md](spec.md).
 
 ---
 
@@ -9,97 +13,87 @@
 ### 1. `SimulationParams`
 
 The complete, validated configuration for a single analysis run. Immutable after
-validation. Serialised to JSON for the run manifest SHA-256 hash.
+validation. Serialised to JSON for the run manifest SHA-256 hash (excluding
+`bq_service_account_path`).
 
 | Field | Type | Unit | Default | Bounds | Description |
 |-------|------|------|---------|--------|-------------|
-| `plant_capacity_mwac` | `float` | MWac | 1.0 | fixed | Normalisation basis; always 1.0 MWac |
-| `ilr_values` | `list[float]` | — | [1.2,1.3,1.4,1.5] | each ∈ [1.0, 2.0] | ILR scenarios to simulate |
-| `bess_size_ratios_pct` | `list[float]` | % of E_solar | [0,5,10,15,20,25,30,40,50,75,100] | each ∈ [0, 500] | BESS energy sizing as % of annual solar energy without BESS |
-| `storage_durations_h` | `list[float]` | h | [2.0] | each ∈ [0.5, 8.0] | Storage duration(s); BESS rated power = energy_cap / duration |
-| `rte_pct` | `float` | % | 85.0 | (0, 100] | Round-trip efficiency; applied on discharge |
-| `degradation_pct_yr` | `float` | %/year | 2.0 | [0, 10] | Annual capacity degradation |
-| `capex_usd_per_kwh` | `float` | USD/kWh | 250.0 | (0, 2000] | BESS CAPEX (market unit) |
-| `usd_brl_rate` | `float` | BRL/USD | 5.0 | (0, 20] | Exchange rate for cost conversion |
-| `useful_life_yr` | `int` | years | 15 | [1, 30] | Economic useful life |
-| `discount_rate_pct` | `float` | %/year | 10.0 | [0, 50] | Discount rate for LCOS |
-| `min_soc_threshold_pct` | `float` | % of capacity | 80.0 | [0, 100] | End-of-day SoC below which grid top-up is triggered |
-| `min_injection_floor_mw` | `float` | MW | 0.0 | [0, 1.0] | Minimum net grid injection during top-up hours |
-| `rng_seed` | `int` | — | 42 | [0, 2³²) | Seed for any stochastic processes |
-| `synthetic_profile_lat` | `float` | ° | -22.0 | [-90, 90] | Latitude for pvlib clearsky |
-| `synthetic_profile_lon` | `float` | ° | -45.0 | [-180, 180] | Longitude for pvlib clearsky |
-| `synthetic_profile_alt_m` | `float` | m | 800.0 | [0, 5000] | Altitude for pvlib Ineichen |
-| `bq_billing_project` | `str` | — | `"cver-solar"` | non-empty | GCP billing project for BigQuery queries |
-| `bq_submarket` | `str` | — | `"SE"` | one of {SE,S,NE,N} | CCEE submarket for PLD price fetch |
-| `bq_year` | `int` | — | 2025 | [2021, 2040] | Year to fetch from CCEE PLD table |
-| `bq_auth_method` | `Literal['adc','service_account']` | — | `"adc"` | — | BigQuery authentication method |
-| `bq_service_account_path` | `str \| None` | — | None | valid path if set | Path to service account JSON key file; None when using ADC |
+| `csv_path` | `str` | — | required | non-empty, existing file | Path to solar generation CSV (8,760 rows) |
+| `mwac` | `float` | MWac | required | > 0 | Plant AC capacity; scales garantia física and BESS |
+| `bq_year` | `int` | year | 2025 | [2000, 2100] | Year to fetch from CCEE PLD BigQuery table |
+| `bq_submarket` | `str` | — | `"SE"` | one of {SE, S, NE, N} | CCEE submarket for PLD price fetch |
+| `capex_usd_per_kwh` | `float` | USD/kWh | 200.0 | > 0 | BESS capital cost in market unit |
+| `usd_brl_rate` | `float` | BRL/USD | 5.0 | > 0 | Exchange rate for CAPEX conversion |
+| `useful_life_years` | `int` | years | 20 | [1, 100] | Economic useful life (undiscounted payback horizon) |
+| `bess_roundtrip_efficiency` | `float` | fraction | 0.85 | (0, 1] | AC-to-AC BESS efficiency applied to charged energy |
+| `bess_o_and_m_pct_capex` | `float` | fraction/yr | 0.015 | [0, 1] | Fixed annual O&M as a share of BESS CAPEX |
+| `bess_degradation_pct_yr` | `float` | fraction/yr | 0.02 | [0, 1] | Annual savings degradation applied to gross savings |
+| `bq_service_account_path` | `str \| None` | — | None | valid path if set | Path to service account JSON key; None when using ADC |
 
 **Invariants**:
-- `bess_size_ratios_pct` must include 0 (for baseline scenario).
-- `rte_pct` / 100 is the discharge efficiency multiplier.
-- `plant_capacity_mwac` is always 1.0 MWac (normalisation basis — engineers scale results
-  by their actual plant MWac).
-- `bq_service_account_path` MUST be set (non-None, existing path) when `bq_auth_method == 'service_account'`.
-- `bq_service_account_path` is NEVER serialised into the manifest SHA-256 hash — only
-  `bq_auth_method` label is recorded (security: no key path in output files).
+- `bq_service_account_path` is **never** serialised into the manifest SHA-256 hash.
+- `mwac > 0` is enforced at input time; determines all downstream BESS sizing.
+- No ILR, grid top-up, SoC floor, discount rate, or RNG seed fields exist in v2.
 
 ---
 
 ### 2. `SolarProfile`
 
-8,760 hourly AC generation values for a 1 MWac plant, normalised. Immutable after load.
+8,760 hourly AC generation values loaded from the engineer-supplied CSV. Immutable after
+load. The physical guarantee (garantia física) is derived here — it is NOT a user input.
 
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
-| `generation_mw` | `np.ndarray[float64, (8760,)]` | MW | Hourly AC power injected, capped at 1.0 MWac |
-| `source` | `Literal['synthetic', 'csv']` | — | Provenance label; appears in all outputs |
-| `source_path` | `str \| None` | — | CSV path if source='csv'; None if synthetic |
-| `annual_energy_mwh` | `float` | MWh | `sum(generation_mw)` — computed on load; used for BESS sizing |
+| `generation_mw` | `np.ndarray[float64, (8760,)]` | MW | Hourly AC power; all values ≥ 0 |
+| `annual_energy_mwh` | `float` | MWh | `sum(generation_mw)` — computed on load |
+| `fc` | `float` | — | `annual_energy_mwh / (mwac × 8760)` — capacity factor |
+| `garantia_fisica_mw` | `float` | MW | `mwac × fc` — physical guarantee; drives all scenario sizing |
+| `csv_filename` | `str` | — | Basename of the source CSV path; logged in all outputs |
 
 **Invariants**:
-- `len(generation_mw) == 8760`
-- All values ∈ [0.0, 1.0] MWac (non-negative, capped at plant capacity)
-- `annual_energy_mwh > 0` (validated; zero-generation profile raises `StructuredError`)
+- `len(generation_mw) == 8760` (exactly one calendar year)
+- All values ∈ [0, ∞) — negative values abort with a descriptive error citing row and value
+- `fc > 0` (guaranteed if `annual_energy_mwh > 0`; zero-energy profile raises `StructuredError`)
+- `garantia_fisica_mw ≤ mwac` by construction (fc ≤ 1)
 
 ---
 
 ### 3. `PriceProfile`
 
-8,760 hourly energy prices. Immutable after load.
+8,760 hourly energy prices from BigQuery. Immutable after fetch.
 
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
-| `prices_brl_per_mwh` | `np.ndarray[float64, (8760,)]` | BRL/MWh | Hourly energy prices |
-| `source` | `Literal['bigquery_pld']` | — | Price data provenance; always BigQuery PLD |
+| `prices_brl_per_mwh` | `np.ndarray[float64, (8760,)]` | BRL/MWh | Hourly CCEE PLD prices |
+| `source` | `str` | — | `"bigquery_pld_{submarket}_{year}"` (e.g., `"bigquery_pld_SE_2025"`) |
 | `bq_submarket` | `str` | — | CCEE submarket (e.g., `"SE"`) |
 | `bq_year` | `int` | — | Year fetched from CCEE PLD table |
 
 **Invariants**:
 - `len(prices_brl_per_mwh) == 8760`
 - All values ≥ 0.0 BRL/MWh
-- `bq_submarket` and `bq_year` are always non-None
-- `bq_service_account_path` is never stored in this entity (security boundary)
+- BigQuery is the sole source — no CSV fallback; unavailability aborts the run
 
 ---
 
-### 4. `BESSConfig` (derived from `SimulationParams` + `SolarProfile` per scenario)
+### 4. `ScenarioDefinition`
 
-Computed sizing for a single (ILR, BESS size ratio, duration) scenario.
-Derived — not directly configurable.
+One of three fixed scenarios defined in `config.py`. Derived from `garantia_fisica_mw`
+after the profile is loaded. Immutable.
 
-| Field | Type | Unit | Derivation |
-|-------|------|------|------------|
-| `energy_capacity_mwh` | `float` | MWh | `(bess_size_ratio_pct / 100) × annual_solar_energy_no_bess_mwh` |
-| `rated_power_mw` | `float` | MW | `energy_capacity_mwh / duration_h` |
-| `capex_brl` | `float` | BRL | `energy_capacity_mwh × 1000 × capex_usd_per_kwh × usd_brl_rate` |
-| `duration_h` | `float` | h | from `storage_durations_h` |
-| `ilr` | `float` | — | from `ilr_values` |
-| `bess_size_ratio_pct` | `float` | % | from `bess_size_ratios_pct` |
+| Field | Type | Unit | Derivation / Value |
+|-------|------|------|--------------------|
+| `label` | `str` | — | `"A"`, `"B"`, or `"C"` |
+| `peak_hours` | `frozenset[int]` | hour-of-day | A: {18,19} / B: {17,18,19} / C: {17,18,19,20}; whole-hour windows only |
+| `duration_h` | `int` | h | A: 2 / B: 3 / C: 4 |
+| `bess_power_mw` | `float` | MW | `= garantia_fisica_mw` |
+| `bess_energy_mwh` | `float` | MWh | `= garantia_fisica_mw × duration_h` |
+| `capex_brl` | `float` | BRL | `= bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate` |
 
-**Note on `annual_solar_energy_no_bess_mwh`**: computed once from `SolarProfile` for each
-ILR value as `sum(min(generation_mw[h] * ilr, 1.0) for h in range(8760))` — this is the
-clipped energy that would be injected without any BESS.
+**Invariants**:
+- Exactly 3 scenarios; labels A, B, C are fixed.
+- `bess_power_mw == bess_energy_mwh / duration_h` (C-rate = 1).
+- `capex_brl > 0` (guaranteed when CAPEX and exchange rate are positive).
 
 ---
 
@@ -110,44 +104,44 @@ Hour-by-hour simulation output for one scenario. Read-only after simulation.
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
 | `soc_mwh` | `np.ndarray[float64, (8760,)]` | MWh | State of charge at end of each hour |
-| `charge_curtail_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Energy charged from curtailment per hour |
-| `charge_grid_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Energy charged from grid generation (top-up) per hour |
-| `discharge_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Energy discharged (before RTE loss) per hour |
-| `curtailment_with_bess_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Residual curtailment per hour after BESS |
-| `curtailment_without_bess_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Curtailment per hour without BESS |
-| `top_up_hours` | `list[int]` | — | Hour indices (0–8759) selected for grid top-up charging; empty if no top-up occurred |
+| `charge_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Energy charged from solar excess (non-peak hours only) |
+| `discharge_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Energy discharged during peak hours |
+| `grid_injection_mwh` | `np.ndarray[float64, (8760,)]` | MWh | Net power delivered to grid each hour |
+| `deficit_mwh` | `np.ndarray[float64, (8760,)]` | MWh | `max(0, garantia_fisica_mw − generation_h)` in peak hours; 0 elsewhere |
+| `residual_deficit_mwh` | `np.ndarray[float64, (8760,)]` | MWh | `deficit_mwh − discharge_mwh`; portion of deficit not covered by BESS |
 
-**Invariants** (validated post-simulation):
-- `soc_mwh` ∈ [0, `energy_capacity_mwh`] for every hour
-- `charge_curtail_mwh + charge_grid_mwh ≤ rated_power_mw` per hour
-- `discharge_mwh ≤ rated_power_mw` per hour
-- `charge_*` and `discharge_*` are never non-zero in the same hour
+**Invariants** (validated post-simulation; violation raises `SimulationConstraintError`):
+- `soc_mwh[h] ∈ [0, bess_energy_mwh]` for every h
+- `charge_mwh[h] > 0` only when `h%24 NOT in peak_hours` AND `generation_h > garantia_fisica_mw`
+- `discharge_mwh[h] > 0` only when `h%24 IN peak_hours`
+- `charge_mwh[h] × discharge_mwh[h] == 0` (never simultaneous)
+- `residual_deficit_mwh[h] ≥ 0` for all h
 
 ---
 
 ### 6. `ScenarioResult`
 
-Scalar annual metrics for one (ILR, BESS %, duration) scenario. Derived from
-`DispatchResult` + `PriceProfile` + `BESSConfig` + `SimulationParams`.
+Scalar annual metrics for one scenario (A, B, or C). Derived from `DispatchResult`,
+`PriceProfile`, `ScenarioDefinition`, and `SimulationParams`.
 
 | Field | Type | Unit | Formula |
 |-------|------|------|---------|
-| `scenario_id` | `tuple[float, float, float]` | (ILR, %, h) | (ilr, bess_size_ratio_pct, duration_h) |
-| `curtailment_without_bess_mwh_yr` | `float` | MWh/yr | `sum(curtailment_without_bess_mwh)` |
-| `curtailment_with_bess_mwh_yr` | `float` | MWh/yr | `sum(curtailment_with_bess_mwh)` |
-| `curtailment_avoided_pct` | `float` | % | `(1 − c_with/c_without) × 100`; 0 if c_without=0 |
-| `effective_cf_pct` | `float` | % | `sum(grid_injection_mwh) / (1.0 MWac × 8760 h) × 100` |
-| `equivalent_cycles_yr` | `float` | cycles/yr | `sum(discharge_mwh) / energy_capacity_mwh`; 0 if cap=0 |
-| `incremental_revenue_brl_yr` | `float` | BRL/yr | `sum(charge_curtail_mwh[h] × price[h] × rte)` |
-| `energy_from_curtail_mwh_yr` | `float` | MWh/yr | `sum(charge_curtail_mwh)` |
-| `energy_from_grid_mwh_yr` | `float` | MWh/yr | `sum(charge_grid_mwh)` |
-| `lcos_brl_per_mwh` | `float \| None` | BRL/MWh | See R-02; `None` if denominator=0 |
-| `payback_yr` | `float \| None` | years | `capex_brl / incremental_revenue_brl_yr`; `None` if revenue≤0 |
-| `top_up_hour_slots` | `list[str]` | HH:00 | Grid top-up window slots derived from `top_up_hours` (e.g., `["00:00", "01:00"]`); empty list if no top-up occurred |
+| `scenario` | `ScenarioDefinition` | — | The source scenario definition |
+| `dispatch` | `DispatchResult` | — | Full hourly dispatch time-series |
+| `fc` | `float` | — | Capacity factor (same for all scenarios) |
+| `garantia_fisica_mw` | `float` | MW | Physical guarantee (same for all scenarios) |
+| `bess_energy_mwh` | `float` | MWh | `garantia_fisica_mw × duration_h` |
+| `bess_power_mw` | `float` | MW | `= garantia_fisica_mw` |
+| `capex_brl` | `float` | BRL | `bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate` |
+| `annual_exposure_without_bess_brl` | `float` | BRL/yr | `Σ(deficit_h × PLD_h)` over the guarantee window |
+| `annual_exposure_with_bess_brl` | `float` | BRL/yr | `Σ(residual_deficit_mwh[h] × PLD_h)` over peak hours |
+| `annual_savings_brl` | `float` | BRL/yr | `exposure_without − exposure_with` |
+| `payback_years` | `float \| None` | years | `capex_brl / annual_savings_brl`; `None` if `annual_savings_brl ≤ 0` |
+| `coverage_pct` | `float` | % | `(1 − exposure_with / exposure_without) × 100`; range [0, 100] |
 
-**String representations** (for table display):
-- `lcos_brl_per_mwh` is None → display `"não calculável"`
-- `payback_yr` is None → display `"não atingível"`
+**String representations** (for table and report display):
+- `payback_years is None` → display `"não atingível"`
+- `coverage_pct` formatted to 1 decimal place with `%` suffix
 
 ---
 
@@ -157,48 +151,56 @@ Written as JSON to `output/<run-id>/manifest.json` at end of every run.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tool_version` | `str` | Semantic version string (e.g., `"1.0.0"`) |
-| `run_id` | `str` | `YYYYMMDD-HHMMSS-<sha256[:7]>` |
-| `timestamp_iso8601` | `str` | ISO 8601 with timezone (e.g., `"2026-05-15T14:30:05-03:00"`) |
-| `params_sha256` | `str` | Full 64-char SHA-256 hex of `json.dumps(params, sort_keys=True)` |
-| `rng_seed` | `int` | RNG seed used |
-| `profile_source` | `str` | `"synthetic"` or CSV filename |
-| `price_source` | `str` | `"bigquery_pld_{submarket}_{year}"` (e.g., `"bigquery_pld_SE_2025"`) |
-| `scenario_top_up_hours` | `dict[str, list[str]]` | Per-scenario top-up slots; key = `"{ilr}_{bess_pct}_{dur_h}"`, value = list of HH:00 strings |
+| `tool_version` | `str` | Semantic version string (e.g., `"2.0.0"`) |
+| `run_id` | `str` | `YYYYMMDD-HHMMSS-<7-char hex>` |
+| `timestamp_iso8601` | `str` | ISO 8601 with timezone (e.g., `"2026-05-18T14:30:05-03:00"`) |
+| `params_sha256` | `str` | 64-char SHA-256 hex of `json.dumps(params, sort_keys=True)` |
+| `profile_source` | `str` | CSV filename (basename); never `"synthetic"` in v2 |
+| `price_source` | `str` | `"bigquery_pld_{submarket}_{year}"` |
+| `fc` | `float` | Capacity factor derived from CSV |
+| `garantia_fisica_mw` | `float` | Physical guarantee in MW |
+| `scenarios` | `list[dict]` | 3 entries, each with: `label`, `peak_hours`, `duration_h`, `bess_power_mw`, `bess_energy_mwh`, `capex_brl` |
+
+**Invariants**:
+- `bq_service_account_path` is NEVER included in `params_sha256` computation.
+- Two runs with identical manifests produce byte-identical numerical results (no stochastic processes in v2).
 
 ---
 
-## State Transitions
+## Dispatch State Transitions
 
-### BESS SoC (per hour, per scenario)
+BESS SoC evolves hour by hour (h = 0 … 8759):
 
 ```
-SoC[h=0] = 0.0  (start of year)
+SoC[0] = 0.0  (start of year, fully discharged)
 
-Each hour h:
-  curtail_h = max(0, solar_dc_mw[h] - 1.0)       # clipping above MWac
-  if curtail_h > 0:
-    Δcharge_curtail = min(curtail_h, rated_power_mw, energy_cap_mwh - SoC[h])
-    SoC[h] += Δcharge_curtail
-  elif SoC[h] > 0:                                 # no curtailment, discharge
-    Δdischarge = min(rated_power_mw, SoC[h])
-    SoC[h] -= Δdischarge
-    grid_injection[h] += Δdischarge × rte
+For each hour h:
+  hour_of_day = h % 24
 
-  if h % 24 == 23 and SoC[h] < min_soc_threshold × energy_cap_mwh:
-    # Two-priority window selection for next day:
-    # Priority 1: hours in next day with curtailment (sorted first)
-    # Priority 2: remaining next-day hours with cheapest PLD price, ranked ascending
-    # Select hours until target SoC is reachable; record selected indices in top_up_hours
-    mark_top_up(priority1_curtail_hours + priority2_cheap_pld_hours, target_soc)
+  if generation[h] > garantia_fisica_mw AND hour_of_day NOT in peak_hours:
+    # Charging from solar excess
+    excess        = generation[h] - garantia_fisica_mw
+    charge        = min(excess, bess_power_mw, bess_energy_mwh - SoC[h])
+    SoC[h+1]      = SoC[h] + charge
+    grid_inj[h]   = generation[h] - charge
 
-[At marked top-up hours]
-  Δcharge_grid = min(rated_power_mw, energy_cap_mwh - SoC[h])
-  SoC[h] += Δcharge_grid
-  (net injection floor enforced: reduce Δcharge_grid if it would drop injection below floor)
+  elif hour_of_day IN peak_hours:
+    # Discharging to cover deficit below garantia física
+    deficit       = max(0, garantia_fisica_mw - generation[h])
+    dispatch      = min(deficit, bess_power_mw, SoC[h])
+    residual      = deficit - dispatch
+    SoC[h+1]      = SoC[h] - dispatch
+    grid_inj[h]   = generation[h] + dispatch
+
+  else:
+    # Idle (non-peak, no excess)
+    SoC[h+1]      = SoC[h]
+    grid_inj[h]   = generation[h]
+
+Invariant enforced at every step: 0 ≤ SoC[h] ≤ bess_energy_mwh
 ```
 
-**Invariant enforced at every step**: `0 ≤ SoC ≤ energy_cap_mwh`.
+No RTE losses, no grid charging, no curtailment, no end-of-day SoC floor in v2.
 
 ---
 
@@ -208,22 +210,20 @@ Each hour h:
 |--------|------|-----------------------|
 | `SolarProfile` CSV | exactly 8,760 rows | `"Solar CSV has {n} rows; expected 8,760"` |
 | `SolarProfile` CSV | all values non-negative numeric | `"Solar CSV row {i}: invalid value '{v}'"` |
-| BigQuery PLD result | exactly 8,760 rows | `"BigQuery PLD: {n} rows returned for year {y}, submarket {s}; expected 8,760"` |
-| BigQuery PLD result | all values ≥ 0 | `"BigQuery PLD: negative price {v} BRL/MWh at index {i}"` |
-| BigQuery auth | service_account path exists | `"BigQuery auth: service account file not found: '{path}'"` |
-| Any parameter | outside documented bounds | `"Parameter '{name}': value {v} {unit} outside [{lo}, {hi}] {unit}"` |
-| Heatmap scenario | not in computed results | `"Scenario (ILR={i}, BESS={b}%, dur={d}h) not found. Available: {list}"` |
-| SoC bound (post-sim) | SoC < 0 or > cap | raises `SimulationConstraintError` |
-| BigQuery unavailable | any `GoogleAPIError` or `TransportError` | raises `DataSourceError`; **run aborts** with descriptive error message |
+| `SolarProfile` CSV | file exists | `"Solar CSV not found: '{path}'"` |
+| `PriceProfile` (BQ) | exactly 8,760 rows returned | `"BigQuery PLD: {n} rows returned for {submarket}/{year}; expected 8,760"` |
+| `PriceProfile` (BQ) | connection or auth success | raises `DataSourceError`; **run aborts** with descriptive error |
+| Any parameter | outside documented bounds | `"Parameter '{name}': value {v} {unit} outside [{lo}, {hi}] {unit}; re-enter"` |
+| SoC bound (post-sim) | `soc_mwh[h] < 0` or `> bess_energy_mwh` | raises `SimulationConstraintError` |
 
 ---
 
 ## Constitution Check (Post-Design)
 
-- [x] **I** — Curtailment = ANEEL: involuntary clipping at MWac threshold. Labelled in all outputs.
-- [x] **II** — All defaults and bounds documented above; no silent values.
-- [x] **III** — All entities/invariants directly encode test assertions.
-- [x] **IV** — `RunManifest` captures all inputs for exact reproduction.
-- [x] **V** — Each entity maps to one module (≤ 400 lines); unit suffixes on all fields.
-- [x] **VI** — `ScenarioResult` fields map 1:1 to chart axes and table columns with units.
-- [x] **VII** — All units explicit: MWac, MWh, BRL/MWh, USD/kWh, %/year, h.
+- [x] **I. Brazilian Sector Compliance** — Garantia física per ANEEL/CCEE convention; PLD price from CCEE BQ table; all outputs reference applicable norm.
+- [x] **II. No Data Fabrication** — All defaults documented with value and unit; no synthetic profile; CSV filename logged in every output.
+- [x] **III. Test-First** — All entities and invariants directly encode test assertions (SoC bounds, power limits, formula reference cases).
+- [x] **IV. Reproducible Results** — `RunManifest` captures all inputs for exact reproduction; no stochastic processes in v2.
+- [x] **V. Modular Python Architecture** — Each entity maps to one module; unit suffixes on all fields; no magic numbers.
+- [x] **VI. Engineering-Quality Visualizations** — `ScenarioResult` fields map 1:1 to chart axes and table columns with units.
+- [x] **VII. SI Units & Brazilian Sector Conventions** — All units explicit: MWac, MWh, BRL/MWh, USD/kWh, h; no mixing.

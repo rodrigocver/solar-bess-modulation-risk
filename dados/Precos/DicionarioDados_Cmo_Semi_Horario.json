@@ -1,0 +1,21 @@
+{
+    "titulo": "DicionarioDados_Cmo_Semi_Horario",
+    "dicionario_simplificado": [
+        {
+            "descricao": "Código do Subsistema",
+            "codigo": "id_subsistema"
+        },
+        {
+            "descricao": "Nome do Subsistema",
+            "codigo": "nom_subsistema"
+        },
+        {
+            "descricao": "Data de referência",
+            "codigo": "din_instante"
+        },
+        {
+            "descricao": "Valor do CMO em R$/MWh",
+            "codigo": "val_cmo"
+        }
+    ]
+}

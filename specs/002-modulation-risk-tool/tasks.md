@@ -1,8 +1,8 @@
 # Tasks: Solar+BESS Modulation Risk Analysis Tool
 
-**Branch**: `002-modulation-risk-tool` | **Updated**: 2026-05-15 (v2 — Garantia Física model)
+**Branch**: `002-modulation-risk-tool` | **Updated**: 2026-05-18 (v3 — post-analysis remediation)
 
-**Input**: spec.md (v2), plan.md (v2)
+**Input**: spec.md (v2), plan.md (v2), data-model.md (v2), contracts/cli-schema.md, research.md
 
 **Note on tests**: Tests are MANDATORY — Constitution Principle III (TDD Non-Negotiable)
 requires failing tests to be written and confirmed before each implementation task begins.
@@ -21,8 +21,8 @@ requires failing tests to be written and confirmed before each implementation ta
 **Purpose**: Project skeleton, dependency files, constants module. Must complete before any other work.
 
 - [ ] T001 Create project skeleton: `solar_bess_risk/` package (10 `.py` files), `tests/unit/`, `tests/integration/`, `tests/contract/` dirs, `output/` dir, `.gitignore` (ignores `output/`, `.venv/`, `__pycache__/`, `*.pyc`) — if not already present from v1
-- [ ] T002 [P] Update `requirements.txt` (remove pvlib; keep numpy≥1.26, pandas≥2.1, plotly≥5.20, google-cloud-bigquery≥3.10, pytest≥8.0, pytest-cov≥4.1) and `pyproject.toml` (bump version to `2.0.0`, update entry point)
-- [ ] T003 [P] Rewrite `solar_bess_risk/config.py` — remove ILR list, BESS size ratios, RNG seed, min SoC threshold, injection floor; add: `SCENARIOS: list[ScenarioDefinition]` (A/B/C as per spec FR-005), `PEAK_HOURS_BY_LABEL` dict, `DEFAULT_BQ_YEAR`, `DEFAULT_BQ_SUBMARKET`, `DEFAULT_CAPEX_USD_KWH = 200.0`, `DEFAULT_USD_BRL_RATE = 5.0`, `DEFAULT_USEFUL_LIFE_YR = 20`, `DEFAULT_DISCOUNT_RATE_PCT = 10.0`; `SimulationParams` dataclass with 8 fields as per plan.md data model; no magic numbers anywhere else
+- [ ] T002 [P] Update `requirements.txt` (remove pvlib; keep numpy≥1.26, pandas≥2.1, plotly≥5.20, google-cloud-bigquery≥3.10, pytest≥8.0, pytest-cov≥4.1) and `pyproject.toml` (bump version to `2.0.0`, update entry point to `solar_bess_risk.__main__:main`)
+- [ ] T003 [P] Rewrite `solar_bess_risk/config.py` — remove ILR list, BESS size ratios, RNG seed, min SoC threshold, injection floor, and discount rate; add: `SCENARIO_TEMPLATES: list[ScenarioTemplate]` (static `label`/`peak_hours`/`duration_h` constants for A/B/C using whole-hour windows 18-20, 17-20, 17-21; **note**: profile-dependent fields `bess_power_mw`, `bess_energy_mwh`, `capex_brl` are NOT set here — full `ScenarioDefinition` objects are assembled in `__main__.py` after CSV loading), `PEAK_HOURS_BY_LABEL: dict[str, frozenset[int]]`, `DEFAULT_BQ_YEAR: int = 2025`, `DEFAULT_BQ_SUBMARKET: str = "SE"`, `DEFAULT_CAPEX_USD_KWH: float = 200.0`, `DEFAULT_USD_BRL_RATE: float = 5.0`, `DEFAULT_USEFUL_LIFE_YR: int = 20`, BESS defaults for 85% efficiency, 1.5% O&M over CAPEX, and 2% annual degradation; `SimulationParams` dataclass with fields per data-model.md (including `bq_service_account_path: str | None = None`); `PARAM_BOUNDS` dict for all validated parameters; no magic numbers anywhere else in the codebase
 
 **Checkpoint**: `pip install -e .` and `python -m solar_bess_risk --help` exit cleanly.
 
@@ -30,13 +30,13 @@ requires failing tests to be written and confirmed before each implementation ta
 
 ## Phase 2: Foundational
 
-**Purpose**: Cross-cutting infrastructure (manifest, entry point) that every user story depends on.
+**Purpose**: Cross-cutting infrastructure (manifest, entry-point stub) that every user story depends on.
 
 ⚠️ **CRITICAL**: Write failing tests FIRST (T004). Confirm they fail before implementing T005.
 
-- [ ] T004 Write failing tests in `tests/unit/test_manifest.py`: run-ID format matches `YYYYMMDD-HHMMSS-<7-char hex>`; SHA-256 of `json.dumps(params, sort_keys=True)` is deterministic; manifest JSON contains all required fields (`tool_version`, `run_id`, `timestamp_iso8601`, `params_sha256`, `profile_source`, `price_source`, `fc`, `garantia_fisica_mw`, `scenarios`); `bq_service_account_path` absent from serialised params; `scenarios` is a list of 3 dicts each with `label`, `peak_hours`, `duration_h`, `bess_power_mw`, `bess_energy_mwh`, `capex_brl`
-- [ ] T005 Implement `solar_bess_risk/manifest.py` — `RunManifest` dataclass (fields: `tool_version`, `run_id`, `timestamp_iso8601`, `params_sha256`, `profile_source`, `price_source`, `fc`, `garantia_fisica_mw`, `scenarios: list[dict]`), `generate_run_id()`, `hash_params()` (SHA-256 of sorted JSON, excludes `bq_service_account_path`), `write_manifest(manifest, results, output_dir) -> Path` (creates `output/<run-id>/manifest.json`); all functions PEP 484 annotated
-- [ ] T006 [P] Implement `solar_bess_risk/__main__.py` — `argparse` CLI flags (`--service-account <path>`); `main()` stub that chains all modules in order; `solar_bess_risk/__init__.py` with `__version__ = "2.0.0"`
+- [ ] T004 Write failing tests in `tests/unit/test_manifest.py` — run-ID format matches `YYYYMMDD-HHMMSS-<7-char hex>`; SHA-256 of `json.dumps(params_dict, sort_keys=True)` is deterministic; manifest JSON contains all required fields: `tool_version`, `run_id`, `timestamp_iso8601`, `params_sha256`, `profile_source`, `price_source`, `fc`, `garantia_fisica_mw`, `scenarios`; `bq_service_account_path` is **absent from the serialised params dict and absent from manifest.json entirely** (not present as `null`); `scenarios` is a list of 3 dicts each with `label`, `peak_hours`, `duration_h`, `bess_power_mw`, `bess_energy_mwh`, `capex_brl`; two calls with identical inputs produce identical SHA-256
+- [ ] T005 Implement `solar_bess_risk/manifest.py` — `RunManifest` dataclass (fields: `tool_version`, `run_id`, `timestamp_iso8601`, `params_sha256`, `profile_source`, `price_source`, `fc`, `garantia_fisica_mw`, `scenarios: list[dict]`), `generate_run_id() -> str`, `hash_params(params: SimulationParams) -> str` (SHA-256 of sorted JSON of all fields except `bq_service_account_path`, which is excluded and not serialised at all), `write_manifest(manifest: RunManifest, output_dir: Path) -> Path` (creates `output/<run-id>/manifest.json`); all functions PEP 484 annotated; all public functions carry a NumPy-style docstring (purpose, parameters with units, return value, raised exceptions)
+- [ ] T006 [P] Implement `solar_bess_risk/__main__.py` stub — `argparse` with `--service-account <path>` flag; `main()` prints `"[solar_bess_risk v2.0.0] Not yet implemented — see T023"` and returns; **this is a placeholder only; the full module chaining is done in T023**; `solar_bess_risk/__init__.py` sets `__version__ = "2.0.0"`; `main()` carries a NumPy-style docstring
 
 **Checkpoint**: `pytest tests/unit/test_manifest.py` passes.
 
@@ -50,15 +50,15 @@ requires failing tests to be written and confirmed before each implementation ta
 
 ### Tests for User Story 1 ⚠️ Write FIRST — confirm they FAIL before implementing T010–T012
 
-- [ ] T007 Write failing contract tests in `tests/contract/test_cli_schema.py` — CT-01 (Enter at non-required prompts→defaults); CT-02 (out-of-bounds→ERRO+reprompt); CT-03 (non-numeric→ERRO+reprompt); CT-04 (8761-row solar CSV rejected with row count); CT-05 (negative solar CSV value cites row+value); CT-06 (non-numeric solar CSV value cites row+value); CT-07 (missing CSV path→run aborts); CT-08 (BQ auth error→run aborts with descriptive error); CT-09 (BQ returns wrong row count→aborts citing actual vs expected); CT-10 (MWac ≤ 0→rejected with ERRO+reprompt); CT-11 (fc and garantia_fisica_mw shown in confirmation summary); CT-12 (service account path absent from summary+manifest)
-- [ ] T008 [P] Write failing unit tests in `tests/unit/test_profile.py` — CSV loader: shape `(8760,)`, all values ≥ 0, correct `annual_energy_mwh` sum, correct `fc = annual_energy_mwh / (mwac * 8760)`, correct `garantia_fisica_mw = mwac * fc`; CSV rejects non-numeric row (cites row number+value), negative row (cites row+value), wrong row count (cites actual vs 8760); `csv_filename` set to basename of path
-- [ ] T009 [P] Write failing unit tests in `tests/unit/test_data_sources.py` — `fetch_price_bigquery` returns `PriceProfile` with `source == 'bigquery_pld_SE_2025'`, `len(prices) == 8760`, all values ≥ 0; `DataSourceError` raised (and propagates without fallback) on BQ auth failure, network error, row count mismatch; mocked BQ client returns deterministic test prices
+- [ ] T007 Write failing contract tests in `tests/contract/test_cli_schema.py` — CT-01 (Enter at non-required prompts → defaults); CT-02 (out-of-bounds value → `ERRO:` message cites parameter name, value, range; re-prompts without aborting); CT-03 (non-numeric value → `ERRO:` + reprompt); CT-04 (8761-row solar CSV → rejected, message cites actual and expected row count); CT-05 (negative value in CSV → `ERRO:` cites row index and value); CT-06 (non-numeric value in CSV → `ERRO:` cites row index and value); CT-07 (missing CSV path → run aborts with descriptive error); CT-08 (BQ auth failure → `DataSourceError` propagates, run aborts with descriptive error, no partial output written); CT-09 (BQ returns ≠ 8760 rows → aborts, message cites actual vs expected count); CT-10 (MWac ≤ 0 → rejected with `ERRO:` + reprompt); CT-11 (confirmation summary shows `fc` and `garantia_fisica_mw`); CT-12 (`bq_service_account_path` absent from confirmation summary and absent from manifest.json entirely — not even as null)
+- [ ] T008 [P] Write failing unit tests in `tests/unit/test_profile.py` — CSV loader: shape `(8760,)`, all values ≥ 0 after clipping negatives to zero, correct `annual_energy_mwh = sum(generation_mw)`, correct `fc = annual_energy_mwh / (mwac * 8760)`, correct `garantia_fisica_mw = mwac * fc`; rejects non-numeric row (cites row index + value), wrong row count (cites actual vs 8760); `csv_filename` equals `os.path.basename(path)`; zero-energy profile (all zeros) raises `StructuredError`
+- [ ] T009 [P] Write failing unit tests in `tests/unit/test_data_sources.py` — `fetch_price_bigquery` returns `PriceProfile` with `source == 'bigquery_pld_SE_2025'`, `len(prices_brl_per_mwh) == 8760`, all values ≥ 0; `DataSourceError` raised (and propagates without fallback) on BQ auth failure, network error, row count ≠ 8760; mocked BQ client returns deterministic test price arrays
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Rewrite `solar_bess_risk/profile.py` — remove synthetic profile generator; keep/update `SolarProfile` dataclass; `load_solar_csv(path: str, mwac: float) -> SolarProfile` with full validation and garantia física computation; display summary (min, max, mean, fc, garantia_fisica_mw) on load; all functions PEP 484 annotated
-- [ ] T011 [US1] Update `solar_bess_risk/data_sources.py` if needed — ensure `DataSourceError` propagates without fallback; no changes to BQ query logic unless needed for new schema
-- [ ] T012 [US1] Rewrite `solar_bess_risk/cli.py` — remove ILR, BESS size ratios, RNG seed, min SoC, injection floor prompts; add required CSV path prompt (no default, must exist and be valid); add required MWac prompt (no default, must be > 0); keep BQ submarket, year, CAPEX, exchange rate, useful life, discount rate prompts with defaults; confirmation summary MUST show fc and garantia_fisica_mw; remove heatmap scenario selection prompt (no longer needed); all error messages match contract test format
+- [ ] T010 [US1] Rewrite `solar_bess_risk/profile.py` — remove synthetic pvlib profile generator entirely; implement `SolarProfile` dataclass per data-model.md; `load_solar_csv(path: str, mwac: float) -> SolarProfile` with full validation (shape, numeric, negatives clipped to zero) and garantia física computation (`fc = annual_energy_mwh / (mwac * 8760)`, `garantia_fisica_mw = mwac * fc`); zero-energy profile raises `StructuredError("Solar CSV has zero annual energy; cannot derive garantia física")`; prints load summary (min, max, mean generation in MW, fc, garantia_fisica_mw); all functions PEP 484 annotated; all public functions carry a NumPy-style docstring
+- [ ] T011 [US1] Update `solar_bess_risk/data_sources.py` if needed — verify `DataSourceError` class exists and propagates without fallback; verify `fetch_price_bigquery(params: SimulationParams) -> PriceProfile` returns correct `PriceProfile` dataclass with `source` field formatted as `"bigquery_pld_{submarket}_{year}"`; no changes to BQ query logic unless required by updated schema
+- [ ] T012 [US1] Rewrite `solar_bess_risk/cli.py` — remove ILR, BESS size ratios, RNG seed, min SoC, injection floor, and discount rate prompts; prompt flow: (1) required CSV path (no default; validates file exists and is loadable), (2) required MWac (no default; must be > 0), (3) BQ submarket [SE/S/NE/N] with default SE, (4) BQ year with default 2025, (5) CAPEX USD/kWh with default 200, (6) USD/BRL rate with default 5.0, (7) useful life years with default 20, (8) BESS efficiency default 85%, (9) O&M default 1.5% CAPEX/yr, (10) degradation default 2%/yr; each prompt displays parameter unit and valid range inline; confirmation summary shows all accepted values plus `fc` and `garantia_fisica_mw`; error messages follow contract format `"ERRO: Parameter '{name}': value {v} {unit} outside [{lo}, {hi}] {unit}; re-enter"`; `--help` lists all parameters with defaults and bounds; all public functions carry a NumPy-style docstring
 
 **Checkpoint**: CT-01 through CT-12 all pass. CSV loads in < 1 s. BQ `DataSourceError` aborts run.
 
@@ -66,7 +66,7 @@ requires failing tests to be written and confirmed before each implementation ta
 
 ## Phase 4: User Story 2 — Simulate Three Fixed Scenarios (P1)
 
-**Goal**: Tool simulates scenarios A, B, C hour-by-hour, enforces all SoC/power bounds, reports progress.
+**Goal**: Tool simulates scenarios A, B, C hour-by-hour, enforces all SoC/power bounds, reports progress and runtime.
 
 **Independent Test**: Run simulation for all 3 scenarios. Verify `annual_exposure_with_bess ≤ annual_exposure_without_bess` for every scenario.
 
@@ -76,18 +76,19 @@ requires failing tests to be written and confirmed before each implementation ta
   - SoC never < 0 or > `bess_energy_mwh` across all 8760 hours (all 3 scenarios)
   - `charge_mwh[h] > 0` and `discharge_mwh[h] > 0` never simultaneously in same hour
   - `charge_mwh[h] > 0` only when `generation[h] > garantia_fisica_mw` AND `h%24 NOT in peak_hours`
+  - **A2 edge case**: `charge_mwh[h] == 0` when `generation[h] > garantia_fisica_mw` AND `h%24 IN peak_hours` (excess during a peak hour does NOT trigger charging; `deficit_mwh[h]` collapses to 0)
   - `discharge_mwh[h] > 0` only when `h%24 IN peak_hours`
   - `deficit_mwh[h] = max(0, garantia_fisica_mw - generation[h])` for peak hours, 0 otherwise
   - `residual_deficit_mwh[h] = deficit_mwh[h] - discharge_mwh[h]` for all h
   - `residual_deficit_mwh[h] >= 0` for all h
   - `grid_injection_mwh[h] = generation[h] - charge_mwh[h] + discharge_mwh[h]` for all h
-  - Scenario C has more peak hours than A → typically lower SoC after peak hours (ordering test)
+  - `simulate_all_scenarios` returns `list[tuple[ScenarioDefinition, DispatchResult]]` of length 3
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Rewrite `solar_bess_risk/simulation.py` — remove ILR sweep, BESS size ratio sweep, curtailment logic, grid top-up logic; implement `simulate_scenario(solar: SolarProfile, prices: PriceProfile, scenario: ScenarioDefinition, params: SimulationParams) -> DispatchResult` with vectorised NumPy dispatch per FR-006; `simulate_all_scenarios(solar, prices, params, progress_cb) -> list[ScenarioResult]` runs A/B/C; post-simulation SoC bound assertion (raises `SimulationConstraintError` on violation); all functions PEP 484 annotated
+- [ ] T014 [US2] Rewrite `solar_bess_risk/simulation.py` — remove ILR sweep, BESS size ratio sweep, curtailment logic, and grid top-up logic; implement `simulate_scenario(solar: SolarProfile, prices: PriceProfile, scenario: ScenarioDefinition, params: SimulationParams) -> DispatchResult` with vectorised NumPy dispatch per FR-006, applying BESS efficiency to charged energy (charging only in non-peak hours with excess; discharging only in peak hours; excess during a peak hour does NOT trigger charging — deficit collapses to 0 so BESS is idle); `simulate_all_scenarios(solar: SolarProfile, prices: PriceProfile, scenarios: list[ScenarioDefinition], params: SimulationParams, progress_cb: Callable[[str], None] | None = None) -> list[tuple[ScenarioDefinition, DispatchResult]]` runs A/B/C and returns paired (scenario, dispatch) tuples — **does NOT compute economics**; economic fields are added downstream by `economics.compute_all_scenarios()` in T016; post-simulation SoC bound assertion (raises `SimulationConstraintError` on violation); all functions PEP 484 annotated; all public functions carry a NumPy-style docstring
 
-**Checkpoint**: `pytest tests/unit/test_simulation.py` passes. 3 scenarios complete in < 30 s.
+**Checkpoint**: `pytest tests/unit/test_simulation.py` passes. 3 scenarios complete in < 30 s (simulation only, with uniform prices).
 
 ---
 
@@ -100,19 +101,20 @@ requires failing tests to be written and confirmed before each implementation ta
 ### Tests for User Story 3 ⚠️ Write FIRST — confirm they FAIL before implementing T016
 
 - [ ] T015 Write failing unit tests in `tests/unit/test_economics.py`:
-  - Uniform-price exposure formula: `exposure_without = garantia_fisica_mw × len(peak_hours_in_year) × P`
-  - `exposure_with = Σ(residual_deficit_h × P)` for peak hours
+  - Uniform-price exposure formula: `exposure_without = garantia_fisica_mw × count_of_peak_hours_in_year × P`
+  - `exposure_with = Σ(residual_deficit_mwh[h] × P)` for peak hours
   - `annual_savings = exposure_without − exposure_with`
   - `payback_years = capex_brl / annual_savings` (reference case with known CAPEX and savings)
-  - `payback_years is None` when `annual_savings ≤ 0`
-  - `coverage_pct = (1 − exposure_with/exposure_without) × 100` (range [0, 100])
+  - **I2**: `payback_years` is stored as `float | None` in `ScenarioResult` — `None` when `annual_savings ≤ 0`; `payback_display(result)` returns the string `"não atingível"` when `payback_years is None`; the `payback_years` field is never the string itself
+  - `coverage_pct = (1 − exposure_with / exposure_without) × 100` (range [0, 100])
   - `capex_brl = bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate`
   - If BESS fully covers all peak-hour deficits: `exposure_with = 0`, `coverage_pct = 100`
-  - Top-10 peak hours table identifies correct 10 hours by highest PLD within any scenario's peak_hours set
+  - `compute_all_scenarios` accepts `list[tuple[ScenarioDefinition, DispatchResult]]` and returns `list[ScenarioResult]`
+  - Top-10 peak hours table identifies correct 10 hours by highest PLD within the union of all scenarios' peak_hours {17, 18, 19, 20}
 
 ### Implementation for User Story 3
 
-- [ ] T016 [US3] Rewrite `solar_bess_risk/economics.py` — remove LCOS, incremental revenue, curtailment metrics, top-up slot tracking; implement `compute_scenario_economics(solar: SolarProfile, prices: PriceProfile, scenario: ScenarioDefinition, dispatch: DispatchResult, params: SimulationParams) -> ScenarioResult`; `compute_all_scenarios(solar, prices, scenarios, dispatches, params) -> list[ScenarioResult]`; `build_top10_peak_hours(results: list[ScenarioResult], prices: PriceProfile) -> pd.DataFrame` (10 rows by highest PLD in union of peak hours sets); `payback_display(result: ScenarioResult) -> str` ("não atingível" if None); all functions PEP 484 annotated
+- [ ] T016 [US3] Rewrite `solar_bess_risk/economics.py` — remove LCOS, incremental revenue, curtailment metrics, top-up slot tracking, and discount rate; implement gross savings, fixed O&M, year-1 net savings, degraded lifetime net savings, and simple degraded payback in `compute_scenario_economics(solar: SolarProfile, prices: PriceProfile, scenario: ScenarioDefinition, dispatch: DispatchResult, params: SimulationParams) -> ScenarioResult`; `compute_all_scenarios(solar: SolarProfile, prices: PriceProfile, dispatch_pairs: list[tuple[ScenarioDefinition, DispatchResult]], params: SimulationParams) -> list[ScenarioResult]`; `build_top10_peak_hours(results: list[ScenarioResult], prices: PriceProfile) -> pd.DataFrame` (10 rows by highest PLD in union of all peak_hours sets; columns: `hour_index`, `date`, `hour_of_day`, `pld_brl_per_mwh`, plus for each scenario `dispatch_mwh` and `residual_deficit_mwh`); `payback_display(result: ScenarioResult) -> str` (returns `"não atingível"` if `payback_years is None`); all functions PEP 484 annotated; all public functions carry a NumPy-style docstring
 
 **Checkpoint**: `pytest tests/unit/test_economics.py` passes. Economic formulas match hand-calculated reference cases.
 
@@ -127,21 +129,23 @@ requires failing tests to be written and confirmed before each implementation ta
 ### Tests for User Story 4 ⚠️ Write FIRST — confirm they FAIL before implementing T018–T021
 
 - [ ] T017 Write failing integration tests in `tests/integration/test_full_run.py`:
-  - End-to-end run (mocked BQ, valid CSV, all defaults) completes without exception
+  - End-to-end run (mocked BQ with 8760 uniform prices, valid CSV, all defaults) completes without exception
   - `output/<run-id>/report.html` exists and contains `<!DOCTYPE html>`
-  - HTML file contains no `cdn.plot.ly` or external URL references
-  - `output/<run-id>/manifest.json` contains all required fields including `fc`, `garantia_fisica_mw`, `scenarios` list
-  - `len(results) == 3` (exactly 3 scenarios)
+  - HTML file contains no `cdn.plot.ly` or other external URL references
+  - `output/<run-id>/manifest.json` parses as valid JSON and contains all required fields: `tool_version`, `run_id`, `timestamp_iso8601`, `params_sha256`, `profile_source`, `price_source`, `fc`, `garantia_fisica_mw`, `scenarios` (list of 3 dicts)
+  - `manifest.json` does NOT contain a `bq_service_account_path` key at any level (not even as null)
+  - `len(results) == 3` (exactly 3 `ScenarioResult` objects)
   - HTML summary table contains exactly 3 data rows (one per scenario)
-  - **SC-001**: wall-clock time for `simulate_all_scenarios()` (3 scenarios, mocked prices) < 30 s
-  - **SC-003**: two consecutive runs with same mocked prices and CSV produce identical numerical results for all 3 scenarios (to within 1e-10)
+  - **SC-001** (simulation scope): wall-clock time for `simulate_all_scenarios()` with mocked uniform prices < 30 s; note — this covers simulation performance only; BigQuery fetch latency is excluded from this test
+  - **SC-002 (manual gate)**: `pytest.mark.skip(reason="SC-002: manual browser verification required — open report.html with network disabled and confirm all charts render within 10 s with no console errors; record outcome as ✅/❌ in the PR description")` stub test
+  - **SC-003**: two consecutive runs with identical mocked prices and CSV produce byte-identical numerical results for all 3 scenarios (difference < 1e-10)
 
 ### Implementation for User Story 4
 
-- [ ] T018 [US4] Implement chart (a) in `solar_bess_risk/report_charts.py` — `build_exposure_bar_chart(results: list[ScenarioResult]) -> go.Figure`: grouped bar chart, one group per scenario (A/B/C), two bars per group (`exposure_without`, `exposure_with`), BRL/yr Y-axis, hover shows exact BRL value, title "Exposição Financeira: Sem vs Com BESS"
-- [ ] T019 [P] [US4] Implement chart (b) in `solar_bess_risk/report_charts.py` — `build_capex_savings_bar_chart(results: list[ScenarioResult], useful_life_years: int) -> go.Figure`: grouped bar chart per scenario, bars = CAPEX (BRL) and cumulative undiscounted savings (= annual_savings × useful_life_years), BRL Y-axis, title "CAPEX vs Economia Acumulada no Horizonte de Vida Útil"
-- [ ] T020 [P] [US4] Implement chart (c) in `solar_bess_risk/report_charts.py` — `build_payback_curve(results: list[ScenarioResult]) -> go.Figure`: line chart, X = year (1..useful_life_years), Y = cumulative savings (BRL) for each scenario (A, B, C as separate lines); horizontal dashed reference line at each scenario's CAPEX value (same colour, dashed); title "Curva de Payback: Economia Acumulada vs Anos"
-- [ ] T021 [US4] Implement `solar_bess_risk/report_export.py` — `build_summary_table_html(results: list[ScenarioResult]) -> str` (3 rows × 10 columns, Portuguese headers with units, "não atingível" display); `build_top10_table_html(top10_df: pd.DataFrame, results: list[ScenarioResult]) -> str` (10 rows, columns: Data, Hora, PLD BRL/MWh, and for each scenario: dispatch MWh + deficit residual MWh); `write_report(figures, summary_html, top10_html, results, params, output_dir) -> Path` (Jinja-free string assembly; `include_plotlyjs=True, full_html=True`; "Premissas e Limitações" section)
+- [ ] T018 [US4] Implement chart (a) in `solar_bess_risk/report_charts.py` — `build_exposure_bar_chart(results: list[ScenarioResult]) -> go.Figure`: grouped bar chart, one group per scenario (A/B/C), two bars per group (`annual_exposure_without_bess_brl`, `annual_exposure_with_bess_brl`), Y-axis label "Exposição Financeira (BRL/ano)", hover tooltip shows exact BRL value with label, title "Exposição Financeira: Sem vs Com BESS", legend present; function carries a NumPy-style docstring
+- [ ] T019 [P] [US4] Implement chart (b) in `solar_bess_risk/report_charts.py` — `build_capex_savings_bar_chart(results: list[ScenarioResult], useful_life_years: int) -> go.Figure`: grouped bar chart per scenario, bars = `capex_brl` and undiscounted cumulative savings (`annual_savings_brl × useful_life_years`), Y-axis label "BRL", title "CAPEX vs Economia Acumulada no Horizonte de Vida Útil", hover shows exact BRL values; function carries a NumPy-style docstring
+- [ ] T020 [P] [US4] Implement chart (c) in `solar_bess_risk/report_charts.py` — `build_payback_curve(results: list[ScenarioResult]) -> go.Figure`: line chart, X = year (1..`useful_life_years` from `results[0].scenario`), Y = cumulative savings BRL for each scenario (A, B, C as separate lines); for scenarios where `annual_savings_brl ≤ 0` plot the flat/negative line and annotate `"não atingível"` in the legend rather than omitting it; horizontal dashed reference line at each scenario's `capex_brl` (same colour as its line, dashed); title "Curva de Payback: Economia Acumulada vs Anos"; X-axis label "Ano", Y-axis label "Economia Acumulada (BRL)"; function carries a NumPy-style docstring
+- [ ] T021 [US4] Implement `solar_bess_risk/report_export.py` — `build_summary_table_html(results: list[ScenarioResult]) -> str` (3 rows × 10 columns, Portuguese headers with units, `payback_display()` for payback column, `coverage_pct` to 1 decimal place with `%`); `build_top10_table_html(top10_df: pd.DataFrame) -> str` (10 rows: Data, Hora, PLD BRL/MWh, and per scenario: Despacho BESS MWh + Déficit Residual MWh); `write_report(figures: list[go.Figure], summary_html: str, top10_html: str, results: list[ScenarioResult], params: SimulationParams, output_dir: Path) -> Path` (Jinja-free string assembly; **`include_plotlyjs='inline'`** — do NOT pass `True` or `'cdn'`; "Premissas e Limitações do Modelo" section); the Premissas section MUST cite these regulatory instruments by exact name and scope: **Portaria MME nº 101/2016** (methodology for calculating physical guarantee of new SIN generation projects; establishes the capacity-factor approach: `garantia_fisica_mw = mwac × fc`), **Portaria MME nº 60/2020** (specific procedures for solar PV plants including physical guarantee revision based on verified generation), **CCEE Regras de Comercialização — Módulo 03 Garantia Física** (operational treatment of physical guarantee in CCEE accounting — lastro, sazonalização, modulação; does NOT define the original calculation methodology), **ANEEL Resolução Normativa nº 1.034/2022** (deadlines and conditions for sazonalização and modulação of physical guarantee); each Premissas item MUST cross-reference which chart(s) it affects; all public functions carry a NumPy-style docstring
 
 **Checkpoint**: `pytest tests/integration/test_full_run.py` passes. HTML opens offline with all charts and tables.
 
@@ -149,25 +153,38 @@ requires failing tests to be written and confirmed before each implementation ta
 
 ## Phase 7: Polish & End-to-End Wiring
 
-- [ ] T022 [P] Add edge-case guards in `solar_bess_risk/simulation.py` and `solar_bess_risk/economics.py` — BESS fully discharges before end of peak block (remaining hours have full deficit as residual); all peak hours have zero generation (BESS never charged, full deficit everywhere); annual_savings ≤ 0 (payback = None, report generates without error)
-- [ ] T023 Wire full end-to-end session in `solar_bess_risk/__main__.py` — chain: `cli.run_session() → profile.load_solar_csv() → data_sources.fetch_price_bigquery() → simulation.simulate_all_scenarios() → economics.compute_all_scenarios() → economics.build_top10_peak_hours() → report_charts.build_*() → report_export.write_report() → manifest.write_manifest()`; print progress at each stage; allow `DataSourceError` to propagate and print error then exit with non-zero status; print done banner with output path
+⚠️ **CRITICAL**: Write failing tests FIRST (T022a). Confirm they FAIL before implementing T022.
+
+- [ ] T022a Write failing unit tests for spec.md §Edge Cases in `tests/unit/test_simulation.py` and `tests/unit/test_economics.py`:
+  - All peak hours have zero generation: `charge_mwh` all-zero (BESS never charged during non-peak hours either); `discharge_mwh` all-zero; `residual_deficit_mwh[h] == garantia_fisica_mw` for every peak hour h
+  - BESS fully discharges mid-peak block (Scenario C, 4 peak hours): after SoC reaches 0 mid-block, `residual_deficit_mwh[h] > 0` for remaining peak hours in that block; simulation does not raise or loop infinitely
+  - High-fc CSV (all hours generate at MWac): `garantia_fisica_mw ≈ mwac`; `annual_exposure_with_bess_brl ≈ 0`; `coverage_pct ≈ 100`; no division-by-zero occurs
+  - `annual_savings_brl ≤ 0`: `payback_years is None`; `payback_display()` returns `"não atingível"`; `write_report()` completes without exception
+  - **A2 edge case**: excess generation during a peak hour → `charge_mwh[h] == 0`, `deficit_mwh[h] == 0`; BESS idle in that hour
+- [ ] T022 [P] Add edge-case guards in `solar_bess_risk/simulation.py` and `solar_bess_risk/economics.py` — BESS fully discharges before end of peak block (remaining peak hours in the block use full deficit as residual; simulation continues); all peak hours have zero generation (BESS never charged; full deficit everywhere); `annual_savings_brl ≤ 0` (payback = None; report and manifest generate without exception); excess during peak hour (no charge triggered per FR-006 A2 edge case)
+- [ ] T023 Wire full end-to-end session in `solar_bess_risk/__main__.py` — replace T006 stub with full chain: `cli.run_session() → profile.load_solar_csv() → data_sources.fetch_price_bigquery() → [assemble ScenarioDefinition list from config + solar] → simulation.simulate_all_scenarios() → economics.compute_all_scenarios() → economics.build_top10_peak_hours() → report_charts.build_exposure_bar_chart() → report_charts.build_capex_savings_bar_chart() → report_charts.build_payback_curve() → report_export.write_report() → manifest.write_manifest()`; print progress banner at each stage; allow `DataSourceError` to propagate — catch at top level, print descriptive error, exit with code 1, write no partial output; print done banner showing output path and elapsed time in seconds
 
 ---
 
 ## Dependencies
 
 ```
-Phase 1 → Phase 2 → Phase 3 (US1) → Phase 4 (US2) → Phase 5 (US3)
-                                                    ↘ Phase 6 (US4) ← Phase 5
-                                                    Phase 6 → Phase 7
+Phase 1 → Phase 2 → Phase 3 (US1, P1) → Phase 4 (US2, P1) → Phase 5 (US3, P2) → Phase 6 (US4, P2) → Phase 7
 ```
 
+- Phase 6 depends on Phase 5 — `ScenarioResult` objects are required by all chart builders and summary table
+- Phase 7 (T022, T023) depends on Phase 6 completing
+- T014 (`simulate_all_scenarios`) returns `list[tuple[ScenarioDefinition, DispatchResult]]`; T016 (`compute_all_scenarios`) consumes this — simulation and economics modules are decoupled
+
 **Parallel execution within phases**:
-- Phase 1: T002 ∥ T003
-- Phase 3 tests: T008 ∥ T009 (different files)
-- Phase 3 impl: T010 ∥ T011 (different modules)
-- Phase 6 chart impl: T019 ∥ T020 (independent chart functions)
-- Phase 7: T022 ∥ T023 (independent)
+
+| Phase | Parallel opportunities |
+|-------|----------------------|
+| Phase 1 | T002 ∥ T003 |
+| Phase 3 tests | T008 ∥ T009 |
+| Phase 3 impl | T010 ∥ T011 |
+| Phase 6 chart impl | T019 ∥ T020 |
+| Phase 7 | T022a → T022 (serial — tests must fail before guards); T022 ∥ T023 |
 
 ---
 
@@ -175,13 +192,35 @@ Phase 1 → Phase 2 → Phase 3 (US1) → Phase 4 (US2) → Phase 5 (US3)
 
 | Metric | Value |
 |--------|-------|
-| Total tasks | 23 |
+| Total tasks | 25 |
 | Phase 1 (Setup) | 3 tasks |
 | Phase 2 (Foundational) | 3 tasks |
 | Phase 3 / US1 (P1) | 6 tasks |
 | Phase 4 / US2 (P1) | 2 tasks |
 | Phase 5 / US3 (P2) | 2 tasks |
 | Phase 6 / US4 (P2) | 5 tasks |
-| Phase 7 (Polish) | 2 tasks |
+| Phase 7 (Polish) | 4 tasks (T022a, T022, T023 + T022a counted separately) |
 | Parallelisable [P] | 9 tasks |
-| Scenarios | 3 fixed (A/B/C) — down from 44 |
+| Scenarios | 3 fixed (A/B/C) |
+
+### Task-to-Requirement Coverage
+
+| FR / SC | Tasks |
+|---------|-------|
+| FR-001 (parameters + defaults) | T003, T007, T012 |
+| FR-002 (CSV required, no fallback) | T008, T010 |
+| FR-003 (garantia física computation) | T008, T010 |
+| FR-004 (BigQuery mandatory) | T009, T011 |
+| FR-005 (3 fixed scenarios) | T003, T013, T014 |
+| FR-006 (dispatch rules + A2 edge case) | T013, T014, T022a, T022 |
+| FR-007 (10 metrics) | T015, T016 |
+| FR-008 (CAPEX formula) | T015, T016 |
+| FR-009 (HTML content — 3 charts + 2 tables) | T017, T018, T019, T020, T021 |
+| FR-010 (self-contained + regulatory norms) | T021 |
+| FR-011 (manifest) | T004, T005 |
+| FR-012 (validation re-prompt) | T007, T012 |
+| SC-001 (< 30 s, simulation scope) | T017 |
+| SC-002 (offline render, manual gate) | T017 |
+| SC-003 (determinism) | T017 |
+| SC-004 (formula accuracy) | T015 |
+| Edge cases (spec.md §Edge Cases) | T022a, T022 |

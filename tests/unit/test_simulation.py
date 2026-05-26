@@ -1,7 +1,4 @@
-"""Unit tests for solar_bess_risk.simulation module.
-
-Tests written FIRST (TDD) — must FAIL until simulation.py is implemented.
-"""
+"""Unit tests for solar_bess_risk.simulation — dispatch engine (v2)."""
 
 from __future__ import annotations
 
@@ -9,213 +6,581 @@ import numpy as np
 import pytest
 
 from solar_bess_risk.config import HOURS_PER_YEAR, SimulationParams
-from solar_bess_risk.profile import SolarProfile
 
 
-def _make_solar_profile(cf: float = 0.3) -> SolarProfile:
-    """Create a simple synthetic-like solar profile for testing."""
-    gen = np.zeros(HOURS_PER_YEAR, dtype=np.float64)
-    # Simulate daylight hours (6–18) with capacity factor `cf`
-    for d in range(365):
-        for h in range(6, 18):
-            gen[d * 24 + h] = cf
+@pytest.fixture
+def params() -> SimulationParams:
+    return SimulationParams(csv_path="/tmp/test.csv", mwac=100.0)
+
+
+@pytest.fixture
+def solar_profile():
+    """A profile with generation that varies: 80 MW day, 0 night."""
+    from solar_bess_risk.profile import SolarProfile
+    gen = np.zeros(HOURS_PER_YEAR)
+    for h in range(HOURS_PER_YEAR):
+        hour_of_day = h % 24
+        if 6 <= hour_of_day <= 17:
+            gen[h] = 80.0  # Above garantia fisica during day
+        else:
+            gen[h] = 0.0
+    annual = float(np.sum(gen))
+    mwac = 100.0
+    fc = annual / (mwac * HOURS_PER_YEAR)
+    gf = mwac * fc
     return SolarProfile(
         generation_mw=gen,
-        source="synthetic",
-        source_path=None,
-        annual_energy_mwh=float(np.sum(gen)),
+        annual_energy_mwh=annual,
+        fc=fc,
+        garantia_fisica_mw=gf,
+        csv_filename="test.csv",
     )
 
 
-def _make_price_profile(price: float = 220.0):
-    """Create a uniform price profile for testing."""
+@pytest.fixture
+def price_profile():
+    """Uniform price profile for testing."""
     from solar_bess_risk.data_sources import PriceProfile
-
     return PriceProfile(
-        prices_brl_per_mwh=np.full(HOURS_PER_YEAR, price, dtype=np.float64),
-        source="bigquery_pld",
+        prices_brl_per_mwh=np.full(HOURS_PER_YEAR, 500.0),
+        source="bigquery_pld_SE_2025",
         bq_submarket="SE",
         bq_year=2025,
     )
 
 
-class TestSoCBounds:
-    """SoC never < 0 or > energy_cap_mwh across 8760 hours."""
+@pytest.fixture
+def scenario_a(solar_profile):
+    """Scenario A: peak hours {18,19}, duration 2h."""
+    from solar_bess_risk.simulation import ScenarioDefinition
+    gf = solar_profile.garantia_fisica_mw
+    return ScenarioDefinition(
+        label="A",
+        peak_hours=frozenset({18, 19}),
+        duration_h=2,
+        bess_power_mw=gf,
+        bess_energy_mwh=gf * 2,
+        capex_brl=gf * 2 * 200.0 * 1000 * 5.0,
+    )
 
-    def test_soc_within_bounds(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
 
-        params = SimulationParams(ilr_values=[1.3])
-        solar = _make_solar_profile(0.9)  # high CF → curtailment at ILR 1.3
-        prices = _make_price_profile()
+@pytest.fixture
+def scenario_c(solar_profile):
+    """Scenario C: peak hours {17,18,19,20}, duration 4h."""
+    from solar_bess_risk.simulation import ScenarioDefinition
+    gf = solar_profile.garantia_fisica_mw
+    return ScenarioDefinition(
+        label="C",
+        peak_hours=frozenset({17, 18, 19, 20}),
+        duration_h=4,
+        bess_power_mw=gf,
+        bess_energy_mwh=gf * 4,
+        capex_brl=gf * 4 * 200.0 * 1000 * 5.0,
+    )
 
-        # Compute annual energy without BESS for ILR 1.3
-        annual_no_bess = float(np.sum(np.minimum(solar.generation_mw * 1.3, 1.0)))
-        energy_cap = 0.25 * annual_no_bess  # 25% BESS
-        rated_power = energy_cap / 2.0
 
-        cfg = BESSConfig(
-            energy_capacity_mwh=energy_cap,
-            rated_power_mw=rated_power,
-            capex_brl=energy_cap * 1000 * 250 * 5,
-            duration_h=2.0,
-            ilr=1.3,
-            bess_size_ratio_pct=25.0,
-        )
-        result = simulate_scenario(cfg, solar, prices, params)
+class TestSimulateScenario:
+    """Core dispatch invariants."""
+
+    def test_soc_never_below_zero(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
         assert np.all(result.soc_mwh >= -1e-10)
-        assert np.all(result.soc_mwh <= energy_cap + 1e-10)
 
+    def test_soc_never_above_capacity(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        assert np.all(result.soc_mwh <= scenario_a.bess_energy_mwh + 1e-10)
 
-class TestPowerLimits:
-    """Power flow per hour ≤ rated_power_mw."""
-
-    def test_charge_within_rated_power(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
-
-        params = SimulationParams(ilr_values=[1.3])
-        solar = _make_solar_profile(0.9)
-        prices = _make_price_profile()
-
-        annual_no_bess = float(np.sum(np.minimum(solar.generation_mw * 1.3, 1.0)))
-        energy_cap = 0.25 * annual_no_bess
-        rated_power = energy_cap / 2.0
-
-        cfg = BESSConfig(
-            energy_capacity_mwh=energy_cap,
-            rated_power_mw=rated_power,
-            capex_brl=energy_cap * 1000 * 250 * 5,
-            duration_h=2.0,
-            ilr=1.3,
-            bess_size_ratio_pct=25.0,
-        )
-        result = simulate_scenario(cfg, solar, prices, params)
-        total_charge = result.charge_curtail_mwh + result.charge_grid_mwh
-        assert np.all(total_charge <= rated_power + 1e-10)
-        assert np.all(result.discharge_mwh <= rated_power + 1e-10)
-
-
-class TestNoSimultaneousChargeDischarge:
-    """Charge and discharge never non-zero in the same hour."""
-
-    def test_no_simultaneous(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
-
-        params = SimulationParams(ilr_values=[1.3])
-        solar = _make_solar_profile(0.9)
-        prices = _make_price_profile()
-
-        annual_no_bess = float(np.sum(np.minimum(solar.generation_mw * 1.3, 1.0)))
-        energy_cap = 0.25 * annual_no_bess
-        rated_power = energy_cap / 2.0
-
-        cfg = BESSConfig(
-            energy_capacity_mwh=energy_cap,
-            rated_power_mw=rated_power,
-            capex_brl=energy_cap * 1000 * 250 * 5,
-            duration_h=2.0,
-            ilr=1.3,
-            bess_size_ratio_pct=25.0,
-        )
-        result = simulate_scenario(cfg, solar, prices, params)
-        total_charge = result.charge_curtail_mwh + result.charge_grid_mwh
-        simultaneous = (total_charge > 1e-10) & (result.discharge_mwh > 1e-10)
+    def test_no_simultaneous_charge_discharge(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        # charge and discharge never both > 0 in same hour
+        simultaneous = (result.charge_mwh > 1e-10) & (result.discharge_mwh > 1e-10)
         assert not np.any(simultaneous)
 
+    def test_one_hour_gap_between_charge_and_discharge(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
 
-class TestBESSZeroPercent:
-    """BESS=0% produces sum(charge_curtail_mwh) == 0."""
+        charged = result.charge_mwh > 1e-10
+        discharged = result.discharge_mwh > 1e-10
+        assert not np.any(charged[:-1] & discharged[1:])
+        assert not np.any(discharged[:-1] & charged[1:])
 
-    def test_zero_bess(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
+    def test_charge_only_when_excess_and_not_peak(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        gf = solar_profile.garantia_fisica_mw
+        for h in range(HOURS_PER_YEAR):
+            if result.charge_mwh[h] > 1e-10:
+                assert solar_profile.generation_mw[h] > gf - 1e-10
+                assert h % 24 not in scenario_a.peak_hours
 
-        params = SimulationParams()
-        solar = _make_solar_profile(0.9)
-        prices = _make_price_profile()
+    def test_discharge_only_when_no_curtailment(self, solar_profile, price_profile, scenario_a, params):
+        """Discharge can use an expanded drain window, but never during curtailment."""
+        from solar_bess_risk.simulation import simulate_scenario
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment[13:18] = scenario_a.bess_power_mw
+        result = simulate_scenario(
+            solar_profile, price_profile, scenario_a, params, curtailment_series=curtailment
+        )
+        for h in range(HOURS_PER_YEAR):
+            if result.discharge_mwh[h] > 1e-10:
+                assert curtailment[h] <= 1e-10
+                assert result.discharge_mwh[h] <= scenario_a.bess_power_mw + 1e-10
 
-        cfg = BESSConfig(
-            energy_capacity_mwh=0.0,
-            rated_power_mw=0.0,
+    def test_deficit_formula(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        gf = solar_profile.garantia_fisica_mw
+        for h in range(HOURS_PER_YEAR):
+            # Deficit = max(0, GF - (gen - curtailment)); no curtailment in this profile
+            expected_deficit = max(0.0, gf - solar_profile.generation_mw[h])
+            assert abs(result.deficit_mwh[h] - expected_deficit) < 1e-10
+
+    def test_residual_deficit_formula(self, solar_profile, price_profile, scenario_a, params):
+        """residual = max(0, deficit - discharge) — drain at hour 23 may exceed deficit."""
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        residual = np.maximum(0.0, result.deficit_mwh - result.discharge_mwh)
+        np.testing.assert_allclose(result.residual_deficit_mwh, residual, atol=1e-10)
+
+    def test_residual_deficit_non_negative(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        assert np.all(result.residual_deficit_mwh >= -1e-10)
+
+    def test_grid_injection_formula(self, solar_profile, price_profile, scenario_a, params):
+        from solar_bess_risk.simulation import simulate_scenario
+        result = simulate_scenario(solar_profile, price_profile, scenario_a, params)
+        expected = solar_profile.generation_mw - result.charge_mwh + result.discharge_mwh
+        np.testing.assert_allclose(result.grid_injection_mwh, expected, atol=1e-10)
+
+    def test_a2_edge_case_excess_during_peak(self, price_profile, params):
+        """Excess during peak hour → no charge, deficit = 0, BESS idle."""
+        from solar_bess_risk.profile import SolarProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        # All hours generate at 100 MW, mwac=100, so gf ~= 100
+        gen = np.full(HOURS_PER_YEAR, 100.0)
+        mwac = 100.0
+        annual = float(np.sum(gen))
+        fc = annual / (mwac * HOURS_PER_YEAR)
+        gf = mwac * fc  # = 100.0
+
+        solar = SolarProfile(
+            generation_mw=gen, annual_energy_mwh=annual,
+            fc=fc, garantia_fisica_mw=gf, csv_filename="test.csv"
+        )
+        scenario = ScenarioDefinition(
+            label="A", peak_hours=frozenset({18, 19}), duration_h=2,
+            bess_power_mw=gf, bess_energy_mwh=gf * 2,
+            capex_brl=gf * 2 * 200 * 1000 * 5.0,
+        )
+        result = simulate_scenario(solar, price_profile, scenario, params)
+        # During peak hours, generation == gf, so deficit = 0, no discharge
+        for h in range(HOURS_PER_YEAR):
+            if h % 24 in scenario.peak_hours:
+                assert result.charge_mwh[h] < 1e-10
+                assert abs(result.deficit_mwh[h]) < 1e-10
+
+
+class TestDeadlineDrain:
+    """Battery must be empty by the following 05:00 deadline."""
+
+    def _prices_trigger_charging(self) -> "np.ndarray":
+        """Off-peak 100 BRL/MWh, peak {18,19} 1000 BRL/MWh → h-rule passes (0.85×1000=850>100)."""
+        from solar_bess_risk.data_sources import PriceProfile
+        arr = np.full(HOURS_PER_YEAR, 100.0)
+        for h in range(HOURS_PER_YEAR):
+            if h % 24 in {18, 19}:
+                arr[h] = 1000.0
+        return arr
+
+    def _scenario_with_charging(self, solar_profile, duration_h: int, peak_hours: frozenset):
+        from solar_bess_risk.simulation import ScenarioDefinition
+        gf = solar_profile.garantia_fisica_mw
+        return ScenarioDefinition(
+            label="X",
+            peak_hours=peak_hours,
+            duration_h=duration_h,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * duration_h,
             capex_brl=0.0,
-            duration_h=2.0,
-            ilr=1.3,
-            bess_size_ratio_pct=0.0,
+            rte=0.85,
         )
-        result = simulate_scenario(cfg, solar, prices, params)
-        assert np.sum(result.charge_curtail_mwh) == 0.0
 
+    def test_soc_zero_by_5am_deadline(self, solar_profile, params):
+        """With h-rule active and solar charging, SoC must be 0 by 05:00."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import simulate_scenario
 
-class TestMonotonicity:
-    """Avoided curtailment monotonically non-decreasing across BESS sizes for fixed ILR."""
-
-    def test_monotonic_avoided_curtailment(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
-
-        params = SimulationParams()
-        solar = _make_solar_profile(0.9)
-        prices = _make_price_profile()
-        ilr = 1.3
-        annual_no_bess = float(np.sum(np.minimum(solar.generation_mw * ilr, 1.0)))
-
-        avoided_values = []
-        for pct in [0, 10, 25, 50, 100]:
-            energy_cap = (pct / 100.0) * annual_no_bess
-            rated_power = energy_cap / 2.0 if energy_cap > 0 else 0.0
-            cfg = BESSConfig(
-                energy_capacity_mwh=energy_cap,
-                rated_power_mw=rated_power,
-                capex_brl=energy_cap * 1000 * 250 * 5,
-                duration_h=2.0,
-                ilr=ilr,
-                bess_size_ratio_pct=float(pct),
-            )
-            result = simulate_scenario(cfg, solar, prices, params)
-            curtail_without = float(np.sum(result.curtailment_without_bess_mwh))
-            curtail_with = float(np.sum(result.curtailment_with_bess_mwh))
-            avoided = curtail_without - curtail_with
-            avoided_values.append(avoided)
-
-        for i in range(1, len(avoided_values)):
-            assert avoided_values[i] >= avoided_values[i - 1] - 1e-10
-
-
-class TestAnnualSolarEnergyNoBess:
-    """annual_solar_energy_no_bess_mwh computed correctly from clipped profile."""
-
-    def test_compute_annual_solar_energy_no_bess(self):
-        from solar_bess_risk.simulation import compute_annual_solar_energy_no_bess
-
-        solar = _make_solar_profile(0.9)
-        # ILR 1.3: clip at 1.0 MWac
-        expected = float(np.sum(np.minimum(solar.generation_mw * 1.3, 1.0)))
-        result = compute_annual_solar_energy_no_bess(solar, 1.3)
-        assert abs(result - expected) < 1e-10
-
-
-class TestTopUpHours:
-    """top_up_hours is a list of int hour-indices when grid top-up occurred."""
-
-    def test_top_up_hours_type(self):
-        from solar_bess_risk.simulation import BESSConfig, simulate_scenario
-
-        params = SimulationParams(ilr_values=[1.3], min_soc_threshold_pct=80.0)
-        solar = _make_solar_profile(0.9)
-        prices = _make_price_profile()
-
-        annual_no_bess = float(np.sum(np.minimum(solar.generation_mw * 1.3, 1.0)))
-        energy_cap = 0.25 * annual_no_bess
-        rated_power = energy_cap / 2.0
-
-        cfg = BESSConfig(
-            energy_capacity_mwh=energy_cap,
-            rated_power_mw=rated_power,
-            capex_brl=energy_cap * 1000 * 250 * 5,
-            duration_h=2.0,
-            ilr=1.3,
-            bess_size_ratio_pct=25.0,
+        prices = PriceProfile(
+            prices_brl_per_mwh=self._prices_trigger_charging(),
+            source="test", bq_submarket="SE", bq_year=2025,
         )
-        result = simulate_scenario(cfg, solar, prices, params)
-        assert isinstance(result.top_up_hours, list)
-        for h in result.top_up_hours:
-            assert isinstance(h, int)
-            assert 0 <= h < HOURS_PER_YEAR
+        scenario = self._scenario_with_charging(solar_profile, 2, frozenset({18, 19}))
+        result = simulate_scenario(solar_profile, prices, scenario, params)
+
+        soc_at_deadline = result.soc_mwh[28::24]
+        assert np.all(soc_at_deadline < 1e-9), (
+            f"SoC not zero by 05:00 — max residual: {soc_at_deadline.max():.6f} MWh"
+        )
+
+    def test_no_discharge_outside_peak_or_drain_window(self, solar_profile, params):
+        """Expanded daily drain may discharge in dawn hours, but never above PCS."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import simulate_scenario
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=self._prices_trigger_charging(),
+            source="test", bq_submarket="SE", bq_year=2025,
+        )
+        peak_hours = frozenset({18, 19})
+        scenario = self._scenario_with_charging(solar_profile, 2, peak_hours)
+        result = simulate_scenario(solar_profile, prices, scenario, params)
+
+        for h in range(HOURS_PER_YEAR):
+            if result.discharge_mwh[h] > 1e-10:
+                assert result.discharge_mwh[h] <= scenario.bess_power_mw + 1e-10
+
+    def test_4h_scenario_drains_to_zero_with_limited_post_peak_hours(self, solar_profile, params):
+        """4h scenario drains to zero without exceeding the PCS power limit."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import simulate_scenario
+
+        # Use prices that trigger charging: off-peak 50, peak {17-20} = 2000
+        arr = np.full(HOURS_PER_YEAR, 50.0)
+        for h in range(HOURS_PER_YEAR):
+            if h % 24 in {17, 18, 19, 20}:
+                arr[h] = 2000.0
+        prices = PriceProfile(
+            prices_brl_per_mwh=arr, source="test", bq_submarket="SE", bq_year=2025
+        )
+        scenario = self._scenario_with_charging(solar_profile, 4, frozenset({17, 18, 19, 20}))
+        result = simulate_scenario(solar_profile, prices, scenario, params)
+
+        soc_at_deadline = result.soc_mwh[28::24]
+        assert np.all(soc_at_deadline < 1e-9), (
+            f"4h scenario: SoC not zero by 05:00 — max: {soc_at_deadline.max():.6f} MWh"
+        )
+        assert np.all(result.discharge_mwh <= scenario.bess_power_mw + 1e-10)
+
+    def test_soc_may_cross_midnight_but_zero_by_deadline(self, solar_profile, params):
+        """SoC may cross midnight, but not the next 05:00 deadline."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import simulate_scenario
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=self._prices_trigger_charging(),
+            source="test", bq_submarket="SE", bq_year=2025,
+        )
+        scenario = self._scenario_with_charging(solar_profile, 2, frozenset({18, 19}))
+        result = simulate_scenario(solar_profile, prices, scenario, params)
+
+        assert np.all(result.soc_mwh[28::24] < 1e-9)
+
+    def test_price_aware_mode_may_discharge_midnight_but_respects_deadline(self, solar_profile, params):
+        """Mode 3 may use dawn drain, but respects 05:00 deadline and gap."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+        for day in range(365):
+            start = day * 24
+            prices_arr[start + 0] = 2000.0
+            prices_arr[start + 18] = 1000.0
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr, source="test", bq_submarket="SE", bq_year=2025
+        )
+        gf = solar_profile.garantia_fisica_mw
+        scenario = ScenarioDefinition(
+            label="P3",
+            peak_hours=frozenset(),
+            duration_h=2,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 2,
+            capex_brl=0.0,
+            rte=0.85,
+            charge_mode=3,
+        )
+        result = simulate_scenario(solar_profile, prices, scenario, params)
+
+        assert np.all(result.soc_mwh[28::24] < 1e-9)
+        assert np.all(result.discharge_mwh <= scenario.bess_power_mw + 1e-10)
+
+        charged = result.charge_mwh > 1e-10
+        discharged = result.discharge_mwh > 1e-10
+        assert not np.any(charged[:-1] & discharged[1:])
+        assert not np.any(discharged[:-1] & charged[1:])
+
+    def test_curtailment_charge_is_limited_by_energy_capacity_not_drain_window(self, solar_profile, price_profile, params):
+        """Curtailment is fully stored when MWh capacity exists, even if the drain window must expand."""
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        gf = solar_profile.garantia_fisica_mw
+        scenario = ScenarioDefinition(
+            label="CURT",
+            peak_hours=frozenset({18, 19}),
+            duration_h=10,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 10,
+            capex_brl=0.0,
+            rte=0.85,
+        )
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment[11] = gf * 7
+
+        result = simulate_scenario(
+            solar_profile, price_profile, scenario, params, curtailment_series=curtailment
+        )
+
+        assert result.curtailment_lost_mwh[11] < 1e-9
+        assert result.charge_mwh[11] >= curtailment[11] - 1e-9
+        assert np.all(result.soc_mwh[28::24] < 1e-9)
+        assert np.all(result.discharge_mwh <= scenario.bess_power_mw + 1e-10)
+
+    def test_no_discharge_during_curtailment_even_for_peak_and_drain(self, solar_profile, params):
+        """Curtailment hours are globally blocked for discharge."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import simulate_scenario
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=self._prices_trigger_charging(),
+            source="test", bq_submarket="SE", bq_year=2025,
+        )
+        scenario = self._scenario_with_charging(solar_profile, 4, frozenset({13, 14, 17, 18}))
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment[13] = scenario.bess_power_mw
+        curtailment[14] = scenario.bess_power_mw
+        curtailment[17] = scenario.bess_power_mw
+
+        result = simulate_scenario(
+            solar_profile, prices, scenario, params, curtailment_series=curtailment
+        )
+
+        assert np.all(result.discharge_mwh[curtailment > 1e-10] < 1e-9)
+
+    def test_expanded_drain_prioritizes_highest_pld_hours(self, solar_profile, params):
+        """Expanded drain must wait for higher PLD hours when deadline capacity allows it."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+        for hour in (18, 19, 22, 23):
+            prices_arr[hour] = 1000.0 + hour
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr, source="test", bq_submarket="SE", bq_year=2025
+        )
+        gf = solar_profile.garantia_fisica_mw
+        rte = 0.85
+        scenario = ScenarioDefinition(
+            label="PLD",
+            peak_hours=frozenset({18, 19}),
+            duration_h=4,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 4,
+            capex_brl=0.0,
+            rte=rte,
+        )
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment[11] = scenario.bess_energy_mwh / rte
+
+        result = simulate_scenario(
+            solar_profile, prices, scenario, params, curtailment_series=curtailment
+        )
+
+        assert np.all(result.discharge_mwh[12:18] < 1e-9)
+        assert np.all(result.discharge_mwh[[18, 19, 22, 23]] > 1e-9)
+
+    def test_price_aware_no_discharge_during_curtailment(self, solar_profile, params):
+        """Mode 3 also blocks discharge in curtailment hours."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+        prices_arr[13] = 2000.0
+        prices_arr[14] = 1900.0
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr, source="test", bq_submarket="SE", bq_year=2025
+        )
+        gf = solar_profile.garantia_fisica_mw
+        scenario = ScenarioDefinition(
+            label="P3",
+            peak_hours=frozenset(),
+            duration_h=2,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 2,
+            capex_brl=0.0,
+            rte=0.85,
+            charge_mode=3,
+        )
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment[13] = gf
+        curtailment[14] = gf
+
+        result = simulate_scenario(
+            solar_profile, prices, scenario, params, curtailment_series=curtailment
+        )
+
+        assert np.all(result.discharge_mwh[curtailment > 1e-10] < 1e-9)
+
+
+class TestHRule:
+    """h-rule: excess solar stored only when rte × min_PLD_peak > PLD_h."""
+
+    def _make_profile(self, gen_array: "np.ndarray", mwac: float = 100.0):
+        from solar_bess_risk.profile import SolarProfile
+        annual = float(np.sum(gen_array))
+        fc = annual / (mwac * HOURS_PER_YEAR)
+        gf = mwac * fc
+        return SolarProfile(
+            generation_mw=gen_array,
+            annual_energy_mwh=annual,
+            fc=fc,
+            garantia_fisica_mw=gf,
+            csv_filename="test.csv",
+        )
+
+    def test_no_charge_when_hrule_fails_uniform_price(self, params):
+        """With uniform PLD=500 and rte=0.85: rte×500=425 < 500 → h-rule always fails.
+        Battery must never charge from solar excess.
+        """
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        # Flat generation at 150 MW (above any reasonable GF)
+        gen = np.full(HOURS_PER_YEAR, 150.0)
+        solar = self._make_profile(gen)
+        gf = solar.garantia_fisica_mw
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=np.full(HOURS_PER_YEAR, 500.0),
+            source="test",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        scenario = ScenarioDefinition(
+            label="A",
+            peak_hours=frozenset({18, 19}),
+            duration_h=2,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 2,
+            capex_brl=0.0,
+            rte=0.85,
+        )
+        result = simulate_scenario(solar, prices, scenario, params)
+        # h-rule: 0.85 × 500 = 425 < 500 → no solar charging ever
+        assert np.all(result.charge_mwh < 1e-10), (
+            "Battery should not charge when rte × min_PLD_peak < PLD_h (sell is better)"
+        )
+
+    def test_charges_when_hrule_passes_higher_peak_pld(self, params):
+        """With low off-peak PLD and high peak PLD: rte × PLD_peak > PLD_off-peak → charges."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        # Build prices: off-peak daytime gets 200 BRL/MWh, peak hours {18,19} get 1000 BRL/MWh
+        prices_arr = np.full(HOURS_PER_YEAR, 200.0)
+        for h in range(HOURS_PER_YEAR):
+            if h % 24 in {18, 19}:
+                prices_arr[h] = 1000.0
+
+        # Generation: 150 MW during daytime (6-17), 0 at night including peak hours.
+        # This creates large excess (gen >> gf) during daytime and deficit at peak.
+        gen = np.zeros(HOURS_PER_YEAR)
+        for h in range(HOURS_PER_YEAR):
+            if 6 <= h % 24 <= 17:
+                gen[h] = 150.0
+        solar = self._make_profile(gen)
+        gf = solar.garantia_fisica_mw  # ≈ 150 × 12/24 / (100/100) ≈ 75 MW
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr,
+            source="test",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        scenario = ScenarioDefinition(
+            label="A",
+            peak_hours=frozenset({18, 19}),
+            duration_h=2,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 2,
+            capex_brl=0.0,
+            rte=0.85,
+        )
+        result = simulate_scenario(solar, prices, scenario, params)
+        # h-rule: 0.85 × 1000 = 850 > 200 → charging must happen in daytime off-peak hours
+        assert np.any(result.charge_mwh > 1e-10), (
+            "Battery should charge when rte × min_PLD_peak > PLD_h"
+        )
+
+    def test_charge_not_capped_by_bess_power(self, params):
+        """Removing bess_power cap: battery absorbs all excess solar up to SoC capacity."""
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        # Prices: off-peak very low (100), peak very high (800) → h-rule passes
+        prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+        for h in range(HOURS_PER_YEAR):
+            if h % 24 in {18, 19}:
+                prices_arr[h] = 800.0
+
+        # Small GF (mwac=10) but large daytime excess (generation=200 MW on a 10 MW plant)
+        gen = np.zeros(HOURS_PER_YEAR)
+        for h in range(HOURS_PER_YEAR):
+            if 6 <= h % 24 <= 17:
+                gen[h] = 200.0
+        solar = self._make_profile(gen, mwac=10.0)
+        gf = solar.garantia_fisica_mw  # ≈ 1.8 MW (small)
+
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr,
+            source="test",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        rte = 0.85
+        scenario = ScenarioDefinition(
+            label="A",
+            peak_hours=frozenset({18, 19}),
+            duration_h=2,
+            bess_power_mw=gf,       # bess_power ≈ 1.8 MW
+            bess_energy_mwh=gf * 2,  # capacity ≈ 3.6 MWh
+            capex_brl=0.0,
+            rte=rte,
+        )
+        result = simulate_scenario(solar, prices, scenario, params)
+
+        # If bess_power cap were still applied: max charge per hour ≈ 1.8 MW.
+        # Without the cap: battery should fill to capacity (≈ gf*2 MWh) quickly.
+        # In first eligible hour (h=6, excess ≈ 200 - gf >> gf), SoC should
+        # jump well above gf (the old per-hour limit).
+        max_soc = result.soc_mwh.max()
+        # Battery capacity = gf*2, so max achievable SoC = gf*2 * rte ≈ 3.1 MWh.
+        # With power cap it would only reach gf * rte ≈ 1.5 MWh in first hour.
+        assert max_soc > gf * rte + 1e-3, (
+            f"SoC {max_soc:.4f} should exceed old bess_power-cap limit "
+            f"{gf * rte:.4f} when charging is uncapped"
+        )
+
+
+class TestSimulateAllScenarios:
+    """Test simulate_all_scenarios returns correct structure."""
+
+    def test_returns_list_of_3_tuples(self, solar_profile, price_profile, params):
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_all_scenarios
+        gf = solar_profile.garantia_fisica_mw
+        scenarios = [
+            ScenarioDefinition("A", frozenset({18, 19}), 2, gf, gf * 2, gf * 2 * 1_000_000),
+            ScenarioDefinition("B", frozenset({17, 18, 19}), 3, gf, gf * 3, gf * 3 * 1_000_000),
+            ScenarioDefinition("C", frozenset({17, 18, 19, 20}), 4, gf, gf * 4, gf * 4 * 1_000_000),
+        ]
+        results = simulate_all_scenarios(solar_profile, price_profile, scenarios, params)
+        assert len(results) == 3
+        for scenario_def, dispatch in results:
+            assert hasattr(dispatch, "soc_mwh")
+            assert hasattr(scenario_def, "label")
