@@ -12,12 +12,17 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
+
+from solar_bess_risk import __version__
 
 if TYPE_CHECKING:
     from solar_bess_risk.config import SimulationParams
+
+SAO_PAULO_TZ = ZoneInfo("America/Sao_Paulo")
 
 
 @dataclass
@@ -29,7 +34,7 @@ class RunManifest:
     tool_version : str
         Semantic version string (e.g. ``"2.0.0"``).
     run_id : str
-        ``YYYYMMDD-HHMMSS-<sha256[:7]>``.
+        ``YYYYMMDD-HHMMSS-v<tool_version>``.
     timestamp_iso8601 : str
         ISO 8601 timestamp with timezone.
     params_sha256 : str
@@ -65,18 +70,17 @@ class RunManifest:
 
 
 def generate_run_id() -> str:
-    """Generate a run ID in the format ``YYYYMMDD-HHMMSS-<7-char hex>``.
+    """Generate a run ID in the format ``YYYYMMDD-HHMMSS-v<version>``.
 
     Returns
     -------
     str
         Run ID string.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(SAO_PAULO_TZ)
     ts = now.strftime("%Y%m%d-%H%M%S")
-    raw = now.isoformat().encode("utf-8")
-    hex7 = hashlib.sha256(raw).hexdigest()[:7]
-    return f"{ts}-{hex7}"
+    version_slug = __version__.replace(".", "_")
+    return f"{ts}-v{version_slug}"
 
 
 def hash_params(params: SimulationParams) -> str:

@@ -61,6 +61,7 @@ DEFAULT_USEFUL_LIFE_YR: int = 20
 DEFAULT_BESS_ROUNDTRIP_EFFICIENCY: float = 0.85
 DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.015
 DEFAULT_BESS_DEGRADATION_PCT_YR: float = 0.02
+DEFAULT_LCOE_DISCOUNT_RATE: float = 0.05
 
 # ---------------------------------------------------------------------------
 # CAPEX fixo por duração (spec v2.0 — não é mais parâmetro do usuário)
@@ -121,6 +122,7 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "bess_roundtrip_efficiency": (0.01, 1.0),
     "bess_o_and_m_pct_capex": (0.0, 1.0),
     "bess_degradation_pct_yr": (0.0, 1.0),
+    "lcoe_discount_rate": (0.0, 1.0),
 }
 
 VALID_BQ_SUBMARKETS: set[str] = {"SE", "S", "NE", "N"}
@@ -171,4 +173,5 @@ class SimulationParams:
     bess_roundtrip_efficiency: float = DEFAULT_BESS_ROUNDTRIP_EFFICIENCY
     bess_o_and_m_pct_capex: float = DEFAULT_BESS_O_AND_M_PCT_CAPEX
     bess_degradation_pct_yr: float = DEFAULT_BESS_DEGRADATION_PCT_YR
+    lcoe_discount_rate: float = DEFAULT_LCOE_DISCOUNT_RATE
     bq_service_account_path: str | None = None

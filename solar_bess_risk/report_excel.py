@@ -216,6 +216,17 @@ def _build_summary_row(
     )
     lcos_brl_mwh = projection.lcos_brl_per_mwh if projection is not None else None
     lifetime_discharge_mwh = projection.lifetime_discharge_mwh if projection is not None else None
+    projected_calendar_years = projection.projected_calendar_years if projection is not None else None
+    cycle_life_reached = projection.cycle_life_reached if projection is not None else None
+    lcoe_discount_rate = projection.lcoe_discount_rate if projection is not None else None
+    annual_discharge_mwh = df["descarga_bess_mw"].sum()
+    ciclos_ano = annual_discharge_mwh / bess_energy_mwh if bess_energy_mwh > 1e-10 else 0.0
+    ciclos_vida_util = (
+        lifetime_discharge_mwh / bess_energy_mwh
+        if lifetime_discharge_mwh is not None and bess_energy_mwh > 1e-10
+        else ciclos_ano
+    )
+    anos_ciclados = ciclos_vida_util / 365.0
 
     coverage_energia = 0.0
     deficit_sem = df["deficit_sem_bess_mw"].sum()
@@ -265,6 +276,9 @@ def _build_summary_row(
         "carga_bess_mw": round(df["carga_bess_mw"].sum()),
         "soc_mwh": round(df["soc_mwh"].mean()),
         "descarga_bess_mw": round(df["descarga_bess_mw"].sum()),
+        "ciclos_ano": round(ciclos_ano, 3),
+        "ciclos_vida_util": round(ciclos_vida_util, 3),
+        "anos_ciclados": round(anos_ciclados, 6),
         "carga_nao_realizada_mwh_ano": round(carga_nao_realizada_total),
         "pld_r_mwh": round(df["pld_r_mwh"].mean(), 2),
         "deficit_sem_bess_mw": round(deficit_sem),
@@ -280,7 +294,14 @@ def _build_summary_row(
         "rte": rte,
         "payback_anos": round(payback, 2) if payback is not None else "",
         "lcos_brl_mwh": round(lcos_brl_mwh, 2) if lcos_brl_mwh is not None else "",
+        "taxa_retorno_lcoe": round(lcoe_discount_rate, 6) if lcoe_discount_rate is not None else "",
         "descarga_bess_mwh_vida_util": round(lifetime_discharge_mwh) if lifetime_discharge_mwh is not None else "",
+        "anos_calendario_projetados": (
+            round(projected_calendar_years, 3) if projected_calendar_years is not None else ""
+        ),
+        "vida_util_por_ciclo_atingida": (
+            bool(cycle_life_reached) if cycle_life_reached is not None else ""
+        ),
     }
     return row
 
@@ -365,6 +386,7 @@ def _build_charge_diagnostics(
         dispatch, pld, gf, gen, _peak_hours, duration_h, year_label = data[:7]
         rte = data[7] if len(data) > 7 else 1.0
         scenario = _scenario_from_data(data)
+        projection = _projection_from_data(data)
         bess_power_mw, bess_energy_mwh, _capex_brl = _scenario_values(
             scenario=scenario,
             garantia_fisica_mw=gf,
@@ -435,6 +457,16 @@ def _build_charge_diagnostics(
         recovered_curtailment = float(np.sum(dispatch.curtailment_mwh - dispatch.curtailment_lost_mwh))
         total_missed = sum(cause_totals.values())
         theoretical_cycle = bess_energy_mwh * 365.0
+        annual_discharge_mwh = float(np.sum(dispatch.discharge_mwh))
+        ciclos_ano = annual_discharge_mwh / bess_energy_mwh if bess_energy_mwh > 1e-9 else 0.0
+        lifetime_discharge_mwh = (
+            projection.lifetime_discharge_mwh
+            if projection is not None and projection.lifetime_discharge_mwh is not None
+            else annual_discharge_mwh
+        )
+        projected_calendar_years = projection.projected_calendar_years if projection is not None else None
+        cycle_life_reached = projection.cycle_life_reached if projection is not None else None
+        ciclos_vida_util = lifetime_discharge_mwh / bess_energy_mwh if bess_energy_mwh > 1e-9 else 0.0
 
         summary_rows.append({
             "cenario": tab_name,
@@ -442,7 +474,16 @@ def _build_charge_diagnostics(
             "duration_h": duration_h,
             "bess_power_mw": round(bess_power_mw, 3),
             "bess_energy_mwh": round(bess_energy_mwh, 3),
-            "descarga_bess_mwh_ano": round(float(np.sum(dispatch.discharge_mwh)), 3),
+            "descarga_bess_mwh_ano": round(annual_discharge_mwh, 3),
+            "ciclos_ano": round(ciclos_ano, 3),
+            "ciclos_vida_util": round(ciclos_vida_util, 3),
+            "anos_ciclados": round(ciclos_vida_util / 365.0, 6),
+            "anos_calendario_projetados": (
+                round(projected_calendar_years, 3) if projected_calendar_years is not None else ""
+            ),
+            "vida_util_por_ciclo_atingida": (
+                bool(cycle_life_reached) if cycle_life_reached is not None else ""
+            ),
             "carga_nao_realizada_mwh_ano": round(total_missed, 3),
             "carga_nao_realizada_pct_ciclo_teorico": round(
                 total_missed / theoretical_cycle * 100.0 if theoretical_cycle > 1e-9 else 0.0, 3
@@ -657,14 +698,16 @@ def build_html_report(
         "injecao_sem_bess_mwh", "injecao_com_bess_mwh",
         "excesso_solar_mw", "curtailment_mw", "curtailment_pct",
         "curtailment_recuperado_mw", "curtailment_recuperado_pct", "curtailment_perdido_mw",
-        "carga_bess_mw", "descarga_bess_mw", "carga_nao_realizada_mwh_ano",
+        "carga_bess_mw", "descarga_bess_mw", "ciclos_ano", "ciclos_vida_util", "anos_ciclados",
+        "carga_nao_realizada_mwh_ano",
         "pld_r_mwh",
         "deficit_sem_bess_mw", "deficit_com_bess_mw",
         "exposicao_sem_bess_r", "exposicao_com_bess_r",
         "saldo_liquido_horario_sem_bess_r", "saldo_liquido_horario_com_bess_r",
         "saldo_liquido_diario_sem_bess_r", "saldo_liquido_diario_com_bess_r",
         "economia_hora_r", "spread_r_mwh", "rte",
-        "payback_anos", "lcos_brl_mwh", "descarga_bess_mwh_vida_util",
+        "payback_anos", "lcos_brl_mwh", "taxa_retorno_lcoe", "descarga_bess_mwh_vida_util",
+        "anos_calendario_projetados", "vida_util_por_ciclo_atingida",
     ]
     summary_df = summary_df[[c for c in preferred if c in summary_df.columns]]
 

@@ -27,18 +27,16 @@ def sample_params() -> SimulationParams:
 
 
 class TestGenerateRunId:
-    """Run-ID format: YYYYMMDD-HHMMSS-<7-char hex>."""
+    """Run-ID format: YYYYMMDD-HHMMSS-v<version>."""
 
     def test_run_id_format(self):
         run_id = generate_run_id()
-        pattern = r"^\d{8}-\d{6}-[0-9a-f]{7}$"
+        pattern = r"^\d{8}-\d{6}-v\d+_\d+_\d+$"
         assert re.match(pattern, run_id), f"Run ID '{run_id}' does not match pattern"
 
-    def test_run_id_contains_hex_suffix(self):
+    def test_run_id_contains_version_suffix(self):
         run_id = generate_run_id()
-        hex_part = run_id.split("-")[-1]
-        assert len(hex_part) == 7
-        int(hex_part, 16)  # must not raise
+        assert run_id.endswith("-v2_0_0")
 
 
 class TestHashParams:

@@ -187,6 +187,10 @@ class TestFullRun:
             capex_brl=1_000_000.0,
             charge_power_mw=10.0,
         )
+        curtailment = np.zeros(HOURS_PER_YEAR)
+        curtailment_lost = np.zeros(HOURS_PER_YEAR)
+        curtailment[12::24] = 5.0
+        curtailment_lost[12::24] = 2.0
         dispatch = DispatchResult(
             soc_mwh=np.zeros(HOURS_PER_YEAR),
             charge_mwh=charge,
@@ -194,8 +198,8 @@ class TestFullRun:
             grid_injection_mwh=grid,
             deficit_mwh=deficit,
             residual_deficit_mwh=residual,
-            curtailment_mwh=np.zeros(HOURS_PER_YEAR),
-            curtailment_lost_mwh=np.zeros(HOURS_PER_YEAR),
+            curtailment_mwh=curtailment,
+            curtailment_lost_mwh=curtailment_lost,
             carga_nao_realizada_diaria_mwh=np.zeros(365),
         )
         results_by_key = {
@@ -226,6 +230,8 @@ class TestFullRun:
         content = Path(path).read_text(encoding="utf-8")
         assert "Relatório Executivo" in content
         assert "Economia Anual" in content
+        assert "Curtailment / Geração" in content
+        assert "0.4%" in content
 
     def test_run_manifest_tracks_selected_submarket_and_executed_scenarios(self, params):
         """Main manifest helper preserves non-SE submarket labels and full scenario sizing."""
@@ -366,6 +372,10 @@ class TestFullRun:
             curtailment_lost_mwh=np.zeros(HOURS_PER_YEAR),
             carga_nao_realizada_diaria_mwh=np.arange(365, dtype=float),
         )
+        dispatch.charge_mwh[98] = 99.0
+        dispatch.charge_mwh[99] = 99.0
+        dispatch.discharge_mwh[100] = 99.0
+        dispatch.discharge_mwh[101] = 99.0
         scenario = ScenarioDefinition(
             label="A",
             peak_hours=frozenset({18, 19}),
@@ -384,6 +394,11 @@ class TestFullRun:
             annual_net_savings_brl=(900_000.0,),
             annual_discharge_mwh=(6_150.0,),
             annual_rte=(0.85,),
+            projected_calendar_years=25.5,
+            target_lifetime_discharge_mwh=99.0 * 365.0 * 20.0,
+            target_equivalent_cycles=365.0 * 20.0,
+            cycle_life_reached=True,
+            lcoe_discount_rate=0.05,
         )
         results_by_key = {
             "2025-2h": (
@@ -416,7 +431,13 @@ class TestFullRun:
         missed_col = headers.index("carga_nao_realizada_mwh_dia") + 1
         payback_col = headers.index("payback_anos") + 1
         lcos_col = headers.index("lcos_brl_mwh") + 1
+        lcoe_rate_col = headers.index("taxa_retorno_lcoe") + 1
         lifetime_discharge_col = headers.index("descarga_bess_mwh_vida_util") + 1
+        cycles_col = headers.index("ciclos_ano") + 1
+        lifetime_cycles_col = headers.index("ciclos_vida_util") + 1
+        cycled_years_col = headers.index("anos_ciclados") + 1
+        projected_years_col = headers.index("anos_calendario_projetados") + 1
+        cycle_life_reached_col = headers.index("vida_util_por_ciclo_atingida") + 1
         injection_sem_col = headers.index("injecao_sem_bess_mwh") + 1
         injection_com_col = headers.index("injecao_com_bess_mwh") + 1
 
@@ -436,7 +457,13 @@ class TestFullRun:
         assert ws.cell(49, missed_col).value == 1
         assert ws.cell(8762, payback_col).value == 7.25
         assert ws.cell(8762, lcos_col).value == 321.45
+        assert ws.cell(8762, lcoe_rate_col).value == 0.05
         assert ws.cell(8762, lifetime_discharge_col).value == 123000
+        assert ws.cell(8762, cycles_col).value == 2
+        assert ws.cell(8762, lifetime_cycles_col).value == round(123000 / scenario.bess_energy_mwh, 3)
+        assert ws.cell(8762, cycled_years_col).value == round((123000 / scenario.bess_energy_mwh) / 365, 6)
+        assert ws.cell(8762, projected_years_col).value == 25.5
+        assert ws.cell(8762, cycle_life_reached_col).value is True
         assert ws.cell(first_data_row, injection_sem_col).value == 0
         assert ws.cell(first_data_row, injection_com_col).value == 0
 

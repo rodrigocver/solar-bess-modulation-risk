@@ -12,6 +12,8 @@ from solar_bess_risk.data_sources import PriceProfile
 from solar_bess_risk.profile import SolarProfile
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
+MAX_CYCLE_LIFE_CALENDAR_MULTIPLIER = 4
+
 
 @dataclass(frozen=True)
 class CashflowProjection:
@@ -25,6 +27,11 @@ class CashflowProjection:
     annual_net_savings_brl: tuple[float, ...]
     annual_discharge_mwh: tuple[float, ...]
     annual_rte: tuple[float, ...]
+    projected_calendar_years: float = 0.0
+    target_lifetime_discharge_mwh: float = 0.0
+    target_equivalent_cycles: float = 0.0
+    cycle_life_reached: bool = False
+    lcoe_discount_rate: float = 0.0
 
 
 def rte_for_year(rte_table: dict[int, float], year: int, fallback: float) -> float:
@@ -72,13 +79,26 @@ def project_cashflows_with_rte(
     annual_net: list[float] = []
     annual_discharge: list[float] = []
     annual_rte: list[float] = []
+    discounted_o_and_m = 0.0
+    discounted_discharge = 0.0
     annual_o_and_m = scenario.capex_brl * params.bess_o_and_m_pct_capex
+    target_equivalent_cycles = params.useful_life_years * 365.0
+    target_lifetime_discharge = scenario.bess_energy_mwh * target_equivalent_cycles
+    max_calendar_years = max(
+        params.useful_life_years,
+        params.useful_life_years * MAX_CYCLE_LIFE_CALENDAR_MULTIPLIER,
+    )
     price_profile = PriceProfile(pld, price_source, bq_submarket, start_year)
 
-    for offset in range(params.useful_life_years):
+    projected_calendar_years = 0.0
+    cycle_life_reached = target_lifetime_discharge <= 1e-10
+
+    for offset in range(max_calendar_years):
+        if cycle_life_reached:
+            break
+
         cashflow_year = start_year + offset
         rte = rte_for_year(rte_table, cashflow_year, fallback_rte)
-        annual_rte.append(rte)
         yearly_scenario = replace(scenario, rte=rte)
         yearly_dispatch = simulate_scenario(
             solar,
@@ -96,24 +116,38 @@ def project_cashflows_with_rte(
             + yearly_dispatch.discharge_mwh
         )
         gross = float(np.sum((injection_com - injection_sem) * pld))
-        net = gross - annual_o_and_m
         discharge_mwh = float(np.sum(yearly_dispatch.discharge_mwh))
+        if discharge_mwh <= 1e-10 and target_lifetime_discharge > 1e-10:
+            year_fraction = 1.0
+        else:
+            remaining_discharge = target_lifetime_discharge - sum(annual_discharge)
+            year_fraction = min(1.0, remaining_discharge / discharge_mwh) if discharge_mwh > 1e-10 else 1.0
 
+        gross *= year_fraction
+        net = gross - annual_o_and_m * year_fraction
+        discharge_mwh *= year_fraction
+        discount_factor = 1 / ((1 + params.lcoe_discount_rate) ** (offset + year_fraction))
+        discounted_o_and_m += annual_o_and_m * year_fraction * discount_factor
+        discounted_discharge += discharge_mwh * discount_factor
+
+        annual_rte.append(rte)
         annual_gross.append(gross)
         annual_net.append(net)
         annual_discharge.append(discharge_mwh)
+        projected_calendar_years += year_fraction
 
         cumulative += net
         if payback is None and cumulative >= scenario.capex_brl:
             if net <= 0:
-                payback = float(offset + 1)
+                payback = offset + year_fraction
             else:
-                payback = offset + (scenario.capex_brl - previous) / net
+                payback = offset + year_fraction * (scenario.capex_brl - previous) / net
         previous = cumulative
+        cycle_life_reached = sum(annual_discharge) + 1e-9 >= target_lifetime_discharge
 
     lifetime_discharge = float(sum(annual_discharge))
-    total_cost = scenario.capex_brl + annual_o_and_m * params.useful_life_years
-    lcos = total_cost / lifetime_discharge if lifetime_discharge > 1e-10 else None
+    total_discounted_cost = scenario.capex_brl + discounted_o_and_m
+    lcos = total_discounted_cost / discounted_discharge if discounted_discharge > 1e-10 else None
 
     return CashflowProjection(
         payback_years=payback,
@@ -124,4 +158,9 @@ def project_cashflows_with_rte(
         annual_net_savings_brl=tuple(annual_net),
         annual_discharge_mwh=tuple(annual_discharge),
         annual_rte=tuple(annual_rte),
+        projected_calendar_years=projected_calendar_years,
+        target_lifetime_discharge_mwh=target_lifetime_discharge,
+        target_equivalent_cycles=target_equivalent_cycles,
+        cycle_life_reached=cycle_life_reached,
+        lcoe_discount_rate=params.lcoe_discount_rate,
     )

@@ -157,6 +157,7 @@ def _build_run_manifest(
             "useful_life_years": params.useful_life_years,
             "bess_o_and_m_pct_capex": params.bess_o_and_m_pct_capex,
             "bess_degradation_pct_yr": params.bess_degradation_pct_yr,
+            "lcoe_discount_rate": params.lcoe_discount_rate,
         },
         price_sources_by_year={str(k): v for k, v in sorted(price_sources_by_year.items())},
         backtest_years=BACKTEST_YEARS,

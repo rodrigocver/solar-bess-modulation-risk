@@ -361,9 +361,11 @@ def _build_kpi_table(
         deficit_com = dispatch.residual_deficit_mwh.sum()
         coverage = (1 - deficit_com / deficit_sem) * 100 if deficit_sem > 0 else 0
 
-        curt_total = dispatch.curtailment_mwh.sum()
-        curt_recovered = curt_total - dispatch.curtailment_lost_mwh.sum()
-        curt_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
+        curt_total = float(dispatch.curtailment_mwh.sum())
+        gen_total = float(np.sum(gen))
+        curt_recovered = curt_total - float(dispatch.curtailment_lost_mwh.sum())
+        curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
+        curt_recovered_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
 
         missed_charge = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
 
@@ -383,7 +385,8 @@ def _build_kpi_table(
             <td>{net_diario_com / 1e3:,.1f}</td>
             <td>{economia / 1e6:,.2f}</td>
             <td>{coverage:.1f}%</td>
-            <td>{curt_pct:.1f}%</td>
+            <td>{curtailment_pct:.1f}%</td>
+            <td>{curt_recovered_pct:.1f}%</td>
             <td>{missed_charge:,.0f}</td>
             <td>{payback_str}</td>
             <td>{lcos_str}</td>
@@ -403,6 +406,7 @@ def _build_kpi_table(
         <th title="Média diária do saldo líquido com BESS (R$ mil/dia)">Saldo Diário c/ BESS (R$ mil/dia)</th>
         <th>Economia (R$ MM/ano)</th>
         <th>Cobertura GF</th>
+        <th>Curtailment / Geração</th>
         <th>Curtailment Recuperado</th>
         <th>Carga Não Realizada (MWh/ano)</th>
         <th>Payback (anos)</th>
@@ -463,9 +467,11 @@ def _build_scenario_tab_content(
     deficit_sem = dispatch.deficit_mwh.sum()
     deficit_com = dispatch.residual_deficit_mwh.sum()
     coverage = (1 - deficit_com / deficit_sem) * 100 if deficit_sem > 0 else 0
-    curt_total = dispatch.curtailment_mwh.sum()
-    curt_recovered = curt_total - dispatch.curtailment_lost_mwh.sum()
-    curt_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
+    curt_total = float(dispatch.curtailment_mwh.sum())
+    gen_total = float(np.sum(gen))
+    curt_recovered = curt_total - float(dispatch.curtailment_lost_mwh.sum())
+    curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
+    curt_recovered_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
     missed_charge_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
     payback_str = f"{payback:.1f} anos" if payback < 100 else "não atingível"
     lcos_str = f"R$ {lcos:,.0f}/MWh" if lcos is not None else "n/a"
@@ -512,7 +518,11 @@ def _build_scenario_tab_content(
             <div class="label">LCOS</div>
         </div>
         <div class="kpi-item">
-            <div class="value">{curt_pct:.1f}%</div>
+            <div class="value">{curtailment_pct:.1f}%</div>
+            <div class="label">Curtailment / Geração</div>
+        </div>
+        <div class="kpi-item">
+            <div class="value">{curt_recovered_pct:.1f}%</div>
             <div class="label">Curtailment Recuperado</div>
         </div>
         <div class="kpi-item">

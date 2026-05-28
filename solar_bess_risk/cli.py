@@ -13,6 +13,7 @@ from solar_bess_risk.config import (
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BESS_DEGRADATION_PCT_YR,
     DEFAULT_BESS_O_AND_M_PCT_CAPEX,
+    DEFAULT_LCOE_DISCOUNT_RATE,
     DEFAULT_RTE_PATH,
     DEFAULT_USD_BRL_RATE,
     DEFAULT_USEFUL_LIFE_YR,
@@ -223,6 +224,14 @@ def run_session(service_account_path: str | None = None) -> tuple:
         deg_lo,
         deg_hi,
     )
+    lcoe_lo, lcoe_hi = PARAM_BOUNDS["lcoe_discount_rate"]
+    lcoe_discount_rate = _prompt_float(
+        "Taxa de retorno para LCOS/LCOE",
+        "fração/ano",
+        DEFAULT_LCOE_DISCOUNT_RATE,
+        lcoe_lo,
+        lcoe_hi,
+    )
 
     # Load RTE table for summary display (best-effort)
     rte_preview: dict[int, float] = {}
@@ -255,6 +264,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Vida útil:        {useful_life} anos")
     print(f"  O&M anual BESS:   {bess_om:.1%} do CAPEX")
     print(f"  Degradação BESS:  {bess_deg:.1%} ao ano")
+    print(f"  Taxa LCOS/LCOE:   {lcoe_discount_rate:.1%} ao ano")
 
     params = SimulationParams(
         csv_path=csv_path,
@@ -264,6 +274,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
         useful_life_years=useful_life,
         bess_o_and_m_pct_capex=bess_om,
         bess_degradation_pct_yr=bess_deg,
+        lcoe_discount_rate=lcoe_discount_rate,
         bq_service_account_path=service_account_path,
     )
     return params, curtailment_enabled, rte_path, charge_mode
