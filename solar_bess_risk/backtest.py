@@ -72,6 +72,7 @@ def build_scenarios(garantia_fisica_mw: float, params: SimulationParams) -> list
             bess_power_mw=bess_power,
             bess_energy_mwh=bess_energy,
             capex_brl=capex_brl,
+            charge_power_mw=bess_power,
             peak_hour_weights=template.peak_hour_weights,
         ))
     return scenarios

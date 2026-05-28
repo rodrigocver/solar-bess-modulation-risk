@@ -25,6 +25,7 @@ from solar_bess_risk.curtailment import get_curtailment_for_scenario
 from solar_bess_risk.data_sources import DataSourceError, PriceProfile, fetch_price_bigquery
 from solar_bess_risk.manifest import RunManifest, generate_run_id, hash_params, write_manifest
 from solar_bess_risk.profile import load_solar_csv
+from solar_bess_risk.projection import project_cashflows_with_rte
 from solar_bess_risk.report_excel import build_excel_report, build_html_report
 from solar_bess_risk.rte import get_rte_metadata, load_rte_table
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
@@ -60,6 +61,7 @@ def _get_scenario_for_duration(
         bess_power_mw=bess_power,
         bess_energy_mwh=bess_energy,
         capex_brl=capex_brl,
+        charge_power_mw=bess_power,
         peak_hour_weights=template.peak_hour_weights,
         rte=rte,
         charge_mode=charge_mode,
@@ -111,17 +113,29 @@ def _build_run_manifest(
     """Build a reproducible manifest from the executed run inputs."""
     scenario_map: dict[int, dict] = {}
     for data in results_by_key.values():
-        _dispatch, _pld, gf, _gen, peak_hours, duration_h, _year_label, rte = data
+        _dispatch, _pld, gf, _gen, peak_hours, duration_h, _year_label, rte = data[:8]
+        scenario = data[8] if len(data) > 8 else None
         if duration_h not in scenario_map:
-            bess_energy = gf * duration_h
+            bess_power = scenario.bess_power_mw if scenario is not None else gf
+            bess_energy = scenario.bess_energy_mwh if scenario is not None else gf * duration_h
+            charge_power = (
+                scenario.charge_power_mw or scenario.bess_power_mw
+                if scenario is not None else bess_power
+            )
+            capex_brl = (
+                scenario.capex_brl
+                if scenario is not None
+                else bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * params.usd_brl_rate
+            )
             scenario_map[duration_h] = {
                 "label": next(t.label for t in SCENARIO_TEMPLATES if t.duration_h == duration_h),
                 "duration_h": duration_h,
                 "peak_hours": sorted(peak_hours),
-                "bess_power_mw": gf,
+                "bess_power_mw": bess_power,
+                "charge_power_mw": charge_power,
                 "bess_energy_mwh": bess_energy,
                 "capex_usd_per_kwh": CAPEX_USD_PER_KWH[duration_h],
-                "capex_brl": bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * params.usd_brl_rate,
+                "capex_brl": capex_brl,
                 "rte_sample": rte,
             }
 
@@ -254,9 +268,20 @@ def main() -> None:
                 ),
                 scenario, params, curtailment_series=curt_series,
             )
+            projection = project_cashflows_with_rte(
+                solar=solar,
+                pld=pld,
+                price_source=price_sources_by_year.get(year, f"bigquery_pld_{params.bq_submarket}_{year}"),
+                bq_submarket=params.bq_submarket,
+                scenario=scenario,
+                params=params,
+                curtailment_series=curt_series,
+                rte_table=rte_table,
+                start_year=year,
+            )
             results_by_key[tab_name] = (
                 dispatch, pld, gf, solar.generation_mw,
-                scenario.peak_hours, dur, year, rte_year,
+                scenario.peak_hours, dur, year, rte_year, scenario, projection,
             )
 
     # Accumulated scenarios
@@ -276,9 +301,20 @@ def main() -> None:
             ),
             scenario, params, curtailment_series=curt_acum,
         )
+        projection = project_cashflows_with_rte(
+            solar=solar,
+            pld=acum_pld,
+            price_source=f"bigquery_pld_{params.bq_submarket}_acum",
+            bq_submarket=params.bq_submarket,
+            scenario=scenario,
+            params=params,
+            curtailment_series=curt_acum,
+            rte_table=rte_table,
+            start_year=min(rte_table) if rte_table else 2025,
+        )
         results_by_key[tab_name] = (
             dispatch, acum_pld, gf, solar.generation_mw,
-            scenario.peak_hours, dur, 2001, rte_acum,
+            scenario.peak_hours, dur, 2001, rte_acum, scenario, projection,
         )
 
     # 5. Generate reports (HTML + Excel + Consultancy report)

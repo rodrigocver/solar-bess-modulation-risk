@@ -69,6 +69,7 @@ def build_summary_table_html(results: list[ScenarioResult], useful_life_years: i
 <td>{r.annual_gross_savings_brl:,.0f}</td>
 <td>{r.annual_o_and_m_brl:,.0f}</td>
 <td>{r.annual_savings_brl:,.0f}</td>
+<td>{r.net_balance_delta_brl:,.0f}</td>
 <td>{payback_display(r)}</td>
 <td>{r.coverage_pct:.1f}%</td>
 </tr>"""
@@ -79,6 +80,7 @@ def build_summary_table_html(results: list[ScenarioResult], useful_life_years: i
 <th>CAPEX (BRL)</th><th>Exposição s/ BESS (BRL/ano)</th>
 <th>Exposição c/ BESS (BRL/ano)</th><th>Economia Bruta (BRL/ano)</th>
 <th>O&M (BRL/ano)</th><th>Economia Líquida Ano 1 (BRL/ano)</th>
+<th>Delta Saldo Líquido (BRL/ano)</th>
 <th>Payback (anos)</th><th>Cobertura</th>
 </tr></thead>
 <tbody>{rows}</tbody>

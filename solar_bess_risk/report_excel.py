@@ -15,7 +15,22 @@ import numpy as np
 import pandas as pd
 
 from solar_bess_risk.config import CAPEX_USD_PER_KWH, HOURS_PER_YEAR
+from solar_bess_risk.config import BESS_BLOCK_SPECS
 from solar_bess_risk.simulation import DispatchResult
+
+
+def _scenario_from_data(data: tuple):
+    """Return the ScenarioDefinition appended by the main pipeline, when present."""
+    if len(data) > 8 and hasattr(data[8], "bess_energy_mwh"):
+        return data[8]
+    return None
+
+
+def _projection_from_data(data: tuple):
+    """Return the CashflowProjection appended by the main pipeline, when present."""
+    if len(data) > 9 and hasattr(data[9], "lcos_brl_per_mwh"):
+        return data[9]
+    return None
 
 
 def _compute_spread_column(
@@ -74,10 +89,6 @@ def _build_hourly_dataframe(
 
     excesso_solar = np.maximum(0.0, generation_mw - dispatch.curtailment_mwh - garantia_fisica_mw)
 
-    exposicao_sem = dispatch.deficit_mwh * pld
-    exposicao_com = dispatch.residual_deficit_mwh * pld
-    economia = exposicao_sem - exposicao_com
-
     # Signed net balance:
     # Sem BESS: injection = gen - curtailment (all curtailment lost)
     # Com BESS: injection = gen - charge - curt_lost + discharge
@@ -87,6 +98,9 @@ def _build_hourly_dataframe(
     injection_com = generation_mw - dispatch.charge_mwh - curt_lost_arr + dispatch.discharge_mwh
     saldo_liquido_sem = (injection_sem - garantia_fisica_mw) * pld
     saldo_liquido_com = (injection_com - garantia_fisica_mw) * pld
+    exposicao_sem = dispatch.deficit_mwh * pld
+    exposicao_com = dispatch.residual_deficit_mwh * pld
+    economia = saldo_liquido_com - saldo_liquido_sem
 
     spread = _compute_spread_column(dispatch.charge_mwh, dispatch.discharge_mwh, pld)
 
@@ -112,6 +126,8 @@ def _build_hourly_dataframe(
         "descarga_ativa": is_discharging,
         "geracao_solar_mw": generation_mw,
         "garantia_fisica_mw": garantia_fisica_mw,
+        "injecao_sem_bess_mwh": injection_sem,
+        "injecao_com_bess_mwh": injection_com,
         "excesso_solar_mw": excesso_solar,
         "curtailment_mw": dispatch.curtailment_mwh,
         "curtailment_pct": curtailment_pct,
@@ -144,12 +160,25 @@ def _build_hourly_dataframe(
     df["saldo_liquido_diario_sem_bess_r"] = daily_sem_at_23
     df["saldo_liquido_diario_com_bess_r"] = daily_com_at_23
 
-    # Round: PLD keeps 2 decimals; all other float columns to 0
+    # Keep enough decimals for auditability. Earlier versions rounded physical
+    # columns to integer MW/MWh, which made manual recalculation of saldo columns
+    # appear inconsistent in Excel even when the underlying formula was correct.
+    financial_cols = {
+        "exposicao_sem_bess_r",
+        "exposicao_com_bess_r",
+        "economia_hora_r",
+        "saldo_liquido_horario_sem_bess_r",
+        "saldo_liquido_horario_com_bess_r",
+        "saldo_liquido_diario_sem_bess_r",
+        "saldo_liquido_diario_com_bess_r",
+    }
     for col in df.select_dtypes(include="float64").columns:
         if "pld" in col:
             df[col] = df[col].round(2)
+        elif col in financial_cols:
+            df[col] = df[col].round(2)
         else:
-            df[col] = df[col].round(0)
+            df[col] = df[col].round(3)
 
     return df
 
@@ -163,20 +192,30 @@ def _build_summary_row(
     rte: float = 1.0,
     dispatch: "DispatchResult | None" = None,
     charge_mode: int = 0,
+    scenario=None,
+    projection=None,
 ) -> dict:
     """Build the summary row (line 8762) for a tab."""
     economia_anual = df["economia_hora_r"].sum()
-    bess_power_mw = garantia_fisica_mw
-    bess_energy_mwh = bess_power_mw * duration_h
-    capex_usd = bess_energy_mwh * 1000 * CAPEX_USD_PER_KWH[duration_h]
-    capex_brl = capex_usd * usd_brl_rate
+    bess_power_mw, bess_energy_mwh, capex_brl = _scenario_values(
+        scenario=scenario,
+        garantia_fisica_mw=garantia_fisica_mw,
+        duration_h=duration_h,
+        usd_brl_rate=usd_brl_rate,
+    )
     fc = df["geracao_solar_mw"].sum() / (mwac * HOURS_PER_YEAR)
 
     # Spread mean (only discharge hours)
     discharge_mask = df["descarga_bess_mw"] > 1e-10
     spread_mean = df.loc[discharge_mask, "spread_r_mwh"].mean() if discharge_mask.any() else 0.0
 
-    payback = capex_brl / economia_anual if economia_anual > 0 else None
+    payback = (
+        projection.payback_years
+        if projection is not None
+        else capex_brl / economia_anual if economia_anual > 0 else None
+    )
+    lcos_brl_mwh = projection.lcos_brl_per_mwh if projection is not None else None
+    lifetime_discharge_mwh = projection.lifetime_discharge_mwh if projection is not None else None
 
     coverage_energia = 0.0
     deficit_sem = df["deficit_sem_bess_mw"].sum()
@@ -205,11 +244,7 @@ def _build_summary_row(
     if dispatch is not None:
         carga_nao_realizada_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
 
-    modo_label = (
-        "Arbitragem de PLD — descarrega nas N horas de maior PLD do dia"
-        if charge_mode == 3
-        else "Cobertura de Déficit — descarrega em qualquer hora com geração < GF"
-    )
+    modo_label = _mode_label(charge_mode)
     row = {
         "data_hora": "RESUMO",
         "hora_dia": "",
@@ -218,6 +253,9 @@ def _build_summary_row(
         "modo_operacao": modo_label,
         "geracao_solar_mw": round(df["geracao_solar_mw"].sum()),
         "garantia_fisica_mw": round(garantia_fisica_mw),
+        "bess_power_mw": round(bess_power_mw),
+        "bess_energy_mwh": round(bess_energy_mwh),
+        "capex_brl": round(capex_brl),
         "excesso_solar_mw": round(df["excesso_solar_mw"].sum()),
         "curtailment_mw": round(curtailment_total),
         "curtailment_pct": round(curtailment_pct_total),
@@ -240,8 +278,264 @@ def _build_summary_row(
         "saldo_liquido_diario_com_bess_r": round(df["saldo_liquido_horario_com_bess_r"].sum() / 365),
         "spread_r_mwh": round(spread_mean),
         "rte": rte,
+        "payback_anos": round(payback, 2) if payback is not None else "",
+        "lcos_brl_mwh": round(lcos_brl_mwh, 2) if lcos_brl_mwh is not None else "",
+        "descarga_bess_mwh_vida_util": round(lifetime_discharge_mwh) if lifetime_discharge_mwh is not None else "",
     }
     return row
+
+
+def _scenario_values(
+    *,
+    scenario,
+    garantia_fisica_mw: float,
+    duration_h: int,
+    usd_brl_rate: float,
+) -> tuple[float, float, float]:
+    """Return executed BESS power, energy, and CAPEX for report metadata."""
+    if scenario is not None:
+        return scenario.bess_power_mw, scenario.bess_energy_mwh, scenario.capex_brl
+
+    import math
+
+    block = BESS_BLOCK_SPECS[duration_h]
+    n_blocks = math.ceil(garantia_fisica_mw / block.block_power_mw)
+    bess_power_mw = n_blocks * block.block_power_mw
+    bess_energy_mwh = n_blocks * block.block_energy_mwh
+    capex_brl = bess_energy_mwh * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
+    return bess_power_mw, bess_energy_mwh, capex_brl
+
+
+def _mode_label(charge_mode: int) -> str:
+    """Return the display label for the selected operation mode."""
+    return (
+        "Arbitragem day-ahead — pareia carga barata com descarga futura de maior PLD"
+        if charge_mode == 3
+        else "Cobertura de Déficit — descarrega em qualquer hora com geração < GF"
+    )
+
+
+def _add_excel_only_columns(
+    df: pd.DataFrame,
+    *,
+    dispatch: DispatchResult,
+    scenario,
+    garantia_fisica_mw: float,
+    duration_h: int,
+    usd_brl_rate: float,
+    rte: float,
+    charge_mode: int,
+) -> pd.DataFrame:
+    """Add Excel-only metadata and daily missed-charge columns."""
+    work = df.copy()
+    bess_power_mw, bess_energy_mwh, capex_brl = _scenario_values(
+        scenario=scenario,
+        garantia_fisica_mw=garantia_fisica_mw,
+        duration_h=duration_h,
+        usd_brl_rate=usd_brl_rate,
+    )
+
+    work["modo_operacao"] = pd.NA
+    work["bess_power_mw"] = np.nan
+    work["bess_energy_mwh"] = np.nan
+    work["capex_brl"] = np.nan
+    work["rte"] = np.nan
+
+    work.loc[0, "modo_operacao"] = _mode_label(charge_mode)
+    work.loc[0, "bess_power_mw"] = round(bess_power_mw)
+    work.loc[0, "bess_energy_mwh"] = round(bess_energy_mwh)
+    work.loc[0, "capex_brl"] = round(capex_brl)
+    work.loc[0, "rte"] = rte
+
+    daily_missed = np.full(HOURS_PER_YEAR, np.nan)
+    daily_missed[23::24] = dispatch.carga_nao_realizada_diaria_mwh
+    work["carga_nao_realizada_mwh_dia"] = np.round(daily_missed, 0)
+    return work
+
+
+def _build_charge_diagnostics(
+    results_by_key: dict[str, tuple],
+    usd_brl_rate: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build charge-miss diagnostics summary and daily detail tables."""
+    summary_rows: list[dict] = []
+    daily_rows: list[dict] = []
+
+    for tab_name, data in results_by_key.items():
+        dispatch, pld, gf, gen, _peak_hours, duration_h, year_label = data[:7]
+        rte = data[7] if len(data) > 7 else 1.0
+        scenario = _scenario_from_data(data)
+        bess_power_mw, bess_energy_mwh, _capex_brl = _scenario_values(
+            scenario=scenario,
+            garantia_fisica_mw=gf,
+            duration_h=duration_h,
+            usd_brl_rate=usd_brl_rate,
+        )
+
+        cause_totals = {
+            "sem_spread_economico_mwh": 0.0,
+            "limite_potencia_ou_janela_mwh": 0.0,
+            "capacidade_nao_economica_mwh": 0.0,
+        }
+        bottleneck_totals = {
+            "gargalo_potencia_carga_mwh": 0.0,
+            "gargalo_janela_descarga_mwh": 0.0,
+            "potencial_extensao_d1_ate_05_mwh": 0.0,
+            "potencial_extensao_d1_total_mwh": 0.0,
+        }
+        days_with_miss = 0
+
+        for day in range(365):
+            start = day * 24
+            stop = start + 24
+            next_start = stop
+            next_stop = min(next_start + 24, HOURS_PER_YEAR)
+            day_discharge = float(dispatch.discharge_mwh[start:stop].sum())
+            missed_mwh = max(0.0, bess_energy_mwh - day_discharge)
+            if missed_mwh <= 1e-9:
+                continue
+
+            days_with_miss += 1
+            day_pld = pld[start:stop]
+            day_gen = gen[start:stop]
+            day_curt = dispatch.curtailment_mwh[start:stop]
+            day_charge = dispatch.charge_mwh[start:stop]
+            day_dis = dispatch.discharge_mwh[start:stop]
+            next_day_pld = pld[next_start:next_stop]
+            next_day_curt = dispatch.curtailment_mwh[next_start:next_stop]
+
+            cause, metrics = _classify_daily_charge_miss(
+                missed_mwh=missed_mwh,
+                rte=float(rte),
+                bess_energy_mwh=bess_energy_mwh,
+                bess_power_mw=bess_power_mw,
+                day_pld=day_pld,
+                day_gen=day_gen,
+                day_curt=day_curt,
+                day_charge=day_charge,
+                day_discharge=day_dis,
+                next_day_pld=next_day_pld,
+                next_day_curt=next_day_curt,
+            )
+            cause_totals[cause] += missed_mwh
+            for key in bottleneck_totals:
+                bottleneck_totals[key] += float(metrics[key])
+            daily_rows.append({
+                "cenario": tab_name,
+                "ano": year_label,
+                "dia_ano": day + 1,
+                "carga_nao_realizada_mwh_dia": round(missed_mwh, 3),
+                "descarga_bess_mwh_dia": round(day_discharge, 3),
+                "causa_dominante": cause.replace("_mwh", ""),
+                **metrics,
+            })
+
+        total_generation = float(np.sum(gen))
+        total_curtailment = float(np.sum(dispatch.curtailment_mwh))
+        recovered_curtailment = float(np.sum(dispatch.curtailment_mwh - dispatch.curtailment_lost_mwh))
+        total_missed = sum(cause_totals.values())
+        theoretical_cycle = bess_energy_mwh * 365.0
+
+        summary_rows.append({
+            "cenario": tab_name,
+            "ano": year_label,
+            "duration_h": duration_h,
+            "bess_power_mw": round(bess_power_mw, 3),
+            "bess_energy_mwh": round(bess_energy_mwh, 3),
+            "descarga_bess_mwh_ano": round(float(np.sum(dispatch.discharge_mwh)), 3),
+            "carga_nao_realizada_mwh_ano": round(total_missed, 3),
+            "carga_nao_realizada_pct_ciclo_teorico": round(
+                total_missed / theoretical_cycle * 100.0 if theoretical_cycle > 1e-9 else 0.0, 3
+            ),
+            "dias_com_carga_nao_realizada": days_with_miss,
+            **{key: round(value, 3) for key, value in cause_totals.items()},
+            **{key: round(value, 3) for key, value in bottleneck_totals.items()},
+            "curtailment_considerado_mwh": round(total_curtailment, 3),
+            "curtailment_pct_geracao": round(
+                total_curtailment / total_generation * 100.0 if total_generation > 1e-9 else 0.0, 3
+            ),
+            "curtailment_recuperado_mwh": round(recovered_curtailment, 3),
+            "curtailment_recuperado_pct": round(
+                recovered_curtailment / total_curtailment * 100.0 if total_curtailment > 1e-9 else 0.0, 3
+            ),
+        })
+
+    return pd.DataFrame(summary_rows), pd.DataFrame(daily_rows)
+
+
+def _classify_daily_charge_miss(
+    *,
+    missed_mwh: float,
+    rte: float,
+    bess_energy_mwh: float,
+    bess_power_mw: float,
+    day_pld: np.ndarray,
+    day_gen: np.ndarray,
+    day_curt: np.ndarray,
+    day_charge: np.ndarray,
+    day_discharge: np.ndarray,
+    next_day_pld: np.ndarray,
+    next_day_curt: np.ndarray,
+) -> tuple[str, dict]:
+    """Classify the dominant reason why a day did not complete a full BESS cycle."""
+    charge_power_mw = bess_power_mw
+    profitable_charge_input = 0.0
+    charge_power_spill_input = 0.0
+    profitable_discharge_slots: set[int] = set()
+    d1_until_05_input = 0.0
+    d1_total_input = 0.0
+
+    for charge_h in range(5, 24):
+        raw_available_charge = max(0.0, float(day_gen[charge_h] + day_curt[charge_h]))
+        available_charge = min(charge_power_mw, raw_available_charge)
+        future_profitable = [
+            discharge_h for discharge_h in range(charge_h + 1, 24)
+            if float(day_curt[discharge_h]) <= 1e-10
+            and rte * float(day_pld[discharge_h]) > float(day_pld[charge_h])
+        ]
+        if future_profitable:
+            profitable_charge_input += available_charge
+            profitable_discharge_slots.update(future_profitable)
+            charge_power_spill_input += max(0.0, raw_available_charge - charge_power_mw)
+        elif len(next_day_pld) > 0:
+            d1_profitable = [
+                h for h in range(len(next_day_pld))
+                if float(next_day_curt[h]) <= 1e-10
+                and rte * float(next_day_pld[h]) > float(day_pld[charge_h])
+            ]
+            if d1_profitable:
+                d1_total_input += available_charge
+                if any(h < 5 for h in d1_profitable):
+                    d1_until_05_input += available_charge
+
+    profitable_output = profitable_charge_input * rte
+    discharge_window_output = len(profitable_discharge_slots) * bess_power_mw
+    charge_power_spill_output = charge_power_spill_input * rte
+    discharge_window_gap = max(0.0, profitable_output - discharge_window_output)
+    d1_until_05_output = d1_until_05_input * rte
+    d1_total_output = d1_total_input * rte
+
+    if profitable_output <= 1e-9:
+        cause = "sem_spread_economico_mwh"
+    elif min(profitable_output, discharge_window_output) + 1e-9 < bess_energy_mwh:
+        cause = "limite_potencia_ou_janela_mwh"
+    else:
+        cause = "capacidade_nao_economica_mwh"
+
+    metrics = {
+        "energia_economica_carregavel_mwh_dia": round(profitable_output, 3),
+        "janela_descarga_economica_mwh_dia": round(discharge_window_output, 3),
+        "gargalo_potencia_carga_mwh": round(charge_power_spill_output, 3),
+        "gargalo_janela_descarga_mwh": round(discharge_window_gap, 3),
+        "potencial_extensao_d1_ate_05_mwh": round(d1_until_05_output, 3),
+        "potencial_extensao_d1_total_mwh": round(d1_total_output, 3),
+        "horas_descarga_economicas_qtd": len(profitable_discharge_slots),
+        "carga_bess_mwh_dia": round(float(np.sum(day_charge)), 3),
+        "descarga_max_horaria_mwh": round(float(np.max(day_discharge)), 3),
+        "pld_min_dia": round(float(np.min(day_pld)), 2),
+        "pld_max_dia": round(float(np.max(day_pld)), 2),
+    }
+    return cause, metrics
 
 
 def build_excel_report(
@@ -277,13 +571,40 @@ def build_excel_report(
         for tab_name, data in results_by_key.items():
             dispatch, pld, gf, gen, peak_hours, duration_h, year_label = data[:7]
             rte = data[7] if len(data) > 7 else 1.0
+            scenario = _scenario_from_data(data)
+            projection = _projection_from_data(data)
 
             df = _build_hourly_dataframe(dispatch, pld, gf, gen, peak_hours, year_label)
-            summary = _build_summary_row(df, gf, duration_h, usd_brl_rate, mwac, rte=rte, dispatch=dispatch, charge_mode=charge_mode)
+            excel_df = _add_excel_only_columns(
+                df,
+                dispatch=dispatch,
+                scenario=scenario,
+                garantia_fisica_mw=gf,
+                duration_h=duration_h,
+                usd_brl_rate=usd_brl_rate,
+                rte=rte,
+                charge_mode=charge_mode,
+            )
+            summary = _build_summary_row(
+                df, gf, duration_h, usd_brl_rate, mwac,
+                rte=rte, dispatch=dispatch, charge_mode=charge_mode, scenario=scenario,
+                projection=projection,
+            )
+            for metadata_col in ("modo_operacao", "bess_power_mw", "bess_energy_mwh", "capex_brl", "rte"):
+                summary[metadata_col] = ""
+            summary.pop("carga_nao_realizada_mwh_ano", None)
+            summary["carga_nao_realizada_mwh_dia"] = ""
             summary_df = pd.DataFrame([summary])
-            full_df = pd.concat([df, summary_df], ignore_index=True)
+            full_df = pd.concat([excel_df, summary_df], ignore_index=True)
 
             full_df.to_excel(writer, sheet_name=tab_name, index=False, freeze_panes=(1, 0))
+
+        diagnostics_summary, diagnostics_daily = _build_charge_diagnostics(
+            results_by_key,
+            usd_brl_rate=usd_brl_rate,
+        )
+        diagnostics_summary.to_excel(writer, sheet_name="diagnostico_carga", index=False)
+        diagnostics_daily.to_excel(writer, sheet_name="diagnostico_diario", index=False)
 
     return str(output_path)
 
@@ -309,8 +630,14 @@ def build_html_report(
     for tab_name, data in results_by_key.items():
         dispatch, pld, gf, gen, peak_hours, duration_h, year_label = data[:7]
         rte = data[7] if len(data) > 7 else 1.0
+        scenario = _scenario_from_data(data)
+        projection = _projection_from_data(data)
         df = _build_hourly_dataframe(dispatch, pld, gf, gen, peak_hours, year_label)
-        summary = _build_summary_row(df, gf, duration_h, usd_brl_rate, mwac, rte=rte, dispatch=dispatch, charge_mode=charge_mode)
+        summary = _build_summary_row(
+            df, gf, duration_h, usd_brl_rate, mwac,
+            rte=rte, dispatch=dispatch, charge_mode=charge_mode, scenario=scenario,
+            projection=projection,
+        )
         summary["cenario"] = tab_name
         summary["capex_usd_kwh"] = CAPEX_USD_PER_KWH[duration_h]
         summary_rows.append(summary)
@@ -326,6 +653,8 @@ def build_html_report(
     summary_df = pd.DataFrame(summary_rows)
     preferred = [
         "cenario", "modo_operacao", "geracao_solar_mw", "garantia_fisica_mw", "capex_usd_kwh",
+        "bess_power_mw", "bess_energy_mwh", "capex_brl",
+        "injecao_sem_bess_mwh", "injecao_com_bess_mwh",
         "excesso_solar_mw", "curtailment_mw", "curtailment_pct",
         "curtailment_recuperado_mw", "curtailment_recuperado_pct", "curtailment_perdido_mw",
         "carga_bess_mw", "descarga_bess_mw", "carga_nao_realizada_mwh_ano",
@@ -335,6 +664,7 @@ def build_html_report(
         "saldo_liquido_horario_sem_bess_r", "saldo_liquido_horario_com_bess_r",
         "saldo_liquido_diario_sem_bess_r", "saldo_liquido_diario_com_bess_r",
         "economia_hora_r", "spread_r_mwh", "rte",
+        "payback_anos", "lcos_brl_mwh", "descarga_bess_mwh_vida_util",
     ]
     summary_df = summary_df[[c for c in preferred if c in summary_df.columns]]
 
@@ -346,7 +676,7 @@ def build_html_report(
         )
 
     charge_mode_label = (
-        "Arbitragem de PLD — descarrega nas N horas de maior PLD do dia"
+        "Arbitragem day-ahead — pareia carga barata com descarga futura de maior PLD"
         if charge_mode == 3
         else "Cobertura de Déficit — descarrega em qualquer hora com geração < GF"
     )

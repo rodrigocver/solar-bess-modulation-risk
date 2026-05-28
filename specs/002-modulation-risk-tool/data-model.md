@@ -85,14 +85,15 @@ after the profile is loaded. Immutable.
 |-------|------|------|--------------------|
 | `label` | `str` | — | `"A"`, `"B"`, or `"C"` |
 | `peak_hours` | `frozenset[int]` | hour-of-day | A: {18,19} / B: {17,18,19} / C: {17,18,19,20}; whole-hour windows only |
-| `duration_h` | `int` | h | A: 2 / B: 3 / C: 4 |
-| `bess_power_mw` | `float` | MW | `= garantia_fisica_mw` |
-| `bess_energy_mwh` | `float` | MWh | `= garantia_fisica_mw × duration_h` |
-| `capex_brl` | `float` | BRL | `= bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate` |
+| `duration_h` | `int` | h | A: 2 / B: 4 (label only; not used to recompute energy/CAPEX) |
+| `bess_power_mw` | `float` | MW | discharge PCS power from block sizing |
+| `charge_power_mw` | `float` | MW | charge PCS power, default `= bess_power_mw` |
+| `bess_energy_mwh` | `float` | MWh | energy from block sizing |
+| `capex_brl` | `float` | BRL | CAPEX from executed scenario |
 
 **Invariants**:
-- Exactly 3 scenarios; labels A, B, C are fixed.
-- `bess_power_mw == bess_energy_mwh / duration_h` (C-rate = 1).
+- Exactly 2 scenarios; labels A and B are fixed.
+- `duration_h` is descriptive only and must not be used downstream to recompute energy or CAPEX.
 - `capex_brl > 0` (guaranteed when CAPEX and exchange rate are positive).
 
 ---
@@ -130,13 +131,14 @@ Scalar annual metrics for one scenario (A, B, or C). Derived from `DispatchResul
 | `dispatch` | `DispatchResult` | — | Full hourly dispatch time-series |
 | `fc` | `float` | — | Capacity factor (same for all scenarios) |
 | `garantia_fisica_mw` | `float` | MW | Physical guarantee (same for all scenarios) |
-| `bess_energy_mwh` | `float` | MWh | `garantia_fisica_mw × duration_h` |
+| `bess_energy_mwh` | `float` | MWh | copied from executed scenario |
 | `bess_power_mw` | `float` | MW | `= garantia_fisica_mw` |
 | `capex_brl` | `float` | BRL | `bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate` |
 | `annual_exposure_without_bess_brl` | `float` | BRL/yr | `Σ(deficit_h × PLD_h)` over the guarantee window |
 | `annual_exposure_with_bess_brl` | `float` | BRL/yr | `Σ(residual_deficit_mwh[h] × PLD_h)` over peak hours |
-| `annual_savings_brl` | `float` | BRL/yr | `exposure_without − exposure_with` |
-| `payback_years` | `float \| None` | years | `capex_brl / annual_savings_brl`; `None` if `annual_savings_brl ≤ 0` |
+| `annual_savings_brl` | `float` | BRL/yr | signed net-balance improvement after fixed O&M |
+| `payback_years` | `float \| None` | years | first projected year where cumulative net savings recover CAPEX; each year re-runs dispatch with that year's RTE |
+| `lcos_brl_mwh` | `float \| None` | BRL/MWh | `(capex_brl + fixed O&M over useful life) / lifetime discharged MWh`, using the same year-by-year RTE projection |
 | `coverage_pct` | `float` | % | `(1 − exposure_with / exposure_without) × 100`; range [0, 100] |
 
 **String representations** (for table and report display):
@@ -159,7 +161,7 @@ Written as JSON to `output/<run-id>/manifest.json` at end of every run.
 | `price_source` | `str` | `"bigquery_pld_{submarket}_{year}"` |
 | `fc` | `float` | Capacity factor derived from CSV |
 | `garantia_fisica_mw` | `float` | Physical guarantee in MW |
-| `scenarios` | `list[dict]` | 3 entries, each with: `label`, `peak_hours`, `duration_h`, `bess_power_mw`, `bess_energy_mwh`, `capex_brl` |
+| `scenarios` | `list[dict]` | 2 entries, each with: `label`, `peak_hours`, `duration_h`, `bess_power_mw`, `charge_power_mw`, `bess_energy_mwh`, `capex_brl` |
 
 **Invariants**:
 - `bq_service_account_path` is NEVER included in `params_sha256` computation.
@@ -180,7 +182,7 @@ For each hour h:
   if generation[h] > garantia_fisica_mw AND hour_of_day NOT in peak_hours:
     # Charging from solar excess
     excess        = generation[h] - garantia_fisica_mw
-    charge        = min(excess, bess_power_mw, bess_energy_mwh - SoC[h])
+    charge        = min(excess, charge_power_mw, (bess_energy_mwh - SoC[h]) / rte)
     SoC[h+1]      = SoC[h] + charge
     grid_inj[h]   = generation[h] - charge
 

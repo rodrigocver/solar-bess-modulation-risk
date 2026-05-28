@@ -6,8 +6,8 @@
 
 ## Summary
 
-A command-line Python tool that simulates a solar+BESS plant hour-by-hour across 3 fixed
-scenarios (A/B/C) and delivers a single self-contained HTML report with three Plotly-based
+A command-line Python tool that simulates a solar+BESS plant hour-by-hour across 2 fixed
+scenarios (A/B) and delivers a single self-contained HTML report with Plotly-based
 interactive charts and a full economic summary table. The physical guarantee (garantia
 física) is derived from the engineer-supplied solar CSV and MWac; it is NOT an input
 parameter. BESS charging occurs only from solar excess above garantia física; BESS
@@ -38,11 +38,11 @@ USD/BRL exchange rate for CAPEX, configurable round-trip efficiency (`rte`, defa
 
 **Project Type**: CLI tool (single entry-point `python -m solar_bess_risk`)
 
-**Performance Goals**: 3 scenarios complete in < 30 s on dual-core 8 GB laptop; vectorised NumPy dispatch loops preferred
+**Performance Goals**: 2 scenarios complete in < 30 s on dual-core 8 GB laptop; vectorised NumPy dispatch loops preferred
 
 **Constraints**: HTML report fully offline (`include_plotlyjs="inline"`); deterministic output; no magic numbers; no module > 400 lines; all public functions type-annotated with unit suffixes
 
-**Scale/Scope**: 8,760 hourly values × 3 scenarios = ~26 k simulation steps; single-process
+**Scale/Scope**: 8,760 hourly values × 2 scenarios = ~18 k simulation steps; single-process
 
 ## Constitution Check
 
@@ -84,7 +84,7 @@ tests/
 │   ├── test_data_sources.py  # BQ price fetcher: auth, row validation, DataSourceError
 │   └── test_manifest.py      # Manifest fields, SHA-256 reproducibility
 ├── integration/
-│   └── test_full_run.py      # Default config end-to-end: 3 scenarios, HTML written
+│   └── test_full_run.py      # Default config end-to-end: 2 scenarios, HTML written
 └── contract/
     └── test_cli_schema.py    # Parameter validation bounds contract
 ```
@@ -125,9 +125,10 @@ class PriceProfile:
 class ScenarioDefinition:
     label: str                  # "A", "B", or "C"
     peak_hours: frozenset[int]  # e.g. {17, 18, 19, 20}
-    duration_h: int             # 2, 3, or 4
-    bess_power_mw: float        # = garantia_fisica_mw
-    bess_energy_mwh: float      # = garantia_fisica_mw * duration_h
+    duration_h: int             # 2 or 4, label only
+    bess_power_mw: float        # discharge PCS power from block sizing
+    charge_power_mw: float      # charge PCS power, defaults to bess_power_mw
+    bess_energy_mwh: float      # energy from block sizing
     capex_brl: float
 
 @dataclass
@@ -160,21 +161,32 @@ class ScenarioResult:
 | Label | peak_hours         | duration_h |
 |-------|--------------------|------------|
 | A     | {18: 1.0, 19: 1.0}                    | 2          |
-| B     | {17: 1.0, 18: 1.0, 19: 1.0} | 3          |
-| C     | {17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0} | 4 |
+| B     | {17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0} | 4 |
 
-For each: `bess_power_mw = garantia_fisica_mw`, `bess_energy_mwh = garantia_fisica_mw × duration_h`
+For each: `bess_power_mw`, `charge_power_mw`, `bess_energy_mwh`, and `capex_brl`
+come from the executed block-sized `ScenarioDefinition`; `duration_h` is not used
+to recompute energy or CAPEX downstream.
 
 ### Dispatch Rules (per FR-006)
 
 **Pre-computation per scenario**: `min_PLD_peak = min(prices[h] for h where h%24 IN peak_hours)`
 
-**Each hour h (0..8759)**:
+**Mode 3 day-ahead optimizer**:
+- Each calendar day is optimized with the known PLD curve.
+- Carryover SoC is drained by 05:00 in the highest-PLD feasible dawn hours.
+- Same-day discharge is ranked by descending PLD and may occur above GF.
+- Prior charge sources are ranked by marginal cost: curtailment first at zero
+  cost, then solar by current-hour PLD.
+- A marginal pair is accepted only when `rte × PLD_discharge > PLD_charge`.
+- The optimizer enforces `charge_power_mw`, `bess_power_mw`, `bess_energy_mwh`,
+  SoC bounds, and no simultaneous charge/discharge.
+
+**Legacy mode each hour h (0..8759)**:
 - `hour_of_day = h % 24`
 - If `generation_h > garantia_fisica_mw` and `hour_of_day NOT in peak_hours`:
   - `excess_h = generation_h − garantia_fisica_mw`
   - h-rule: if `rte × min_PLD_peak > prices[h]`:
-    - `charge_h = min(excess_h, bess_energy_mwh − soc_h)`  *(no bess_power_mw cap on charge)*
+    - `charge_h = min(excess_h, charge_power_mw, (bess_energy_mwh − soc_h) / rte)`
     - `soc_{h+1} = soc_h + charge_h`
     - `grid_injection_h = generation_h − charge_h`
   - else (h-rule fails — sell excess directly):
@@ -196,11 +208,18 @@ For each: `bess_power_mw = garantia_fisica_mw`, `bess_energy_mwh = garantia_fisi
 ```
 annual_exposure_without_bess = Σ(deficit_h × PLD_h)            for h in the guarantee window
 annual_exposure_with_bess    = Σ(residual_deficit_h × PLD_h)   for h in the guarantee window
-annual_savings               = exposure_without − exposure_with
-payback_years                = capex_brl / annual_savings       (None if annual_savings ≤ 0)
+annual_gross_savings         = Σ((grid_injection_with_bess − GF) × PLD)
+                               − Σ((grid_injection_without_bess − GF) × PLD)
+annual_savings               = annual_gross_savings − annual_o_and_m
+payback_years                = first projected year where cumulative net savings recover capex_brl
+lcos_brl_mwh                 = (capex_brl + fixed O&M over useful life) / projected discharged MWh
 coverage_pct                 = (1 − exposure_with/exposure_without) × 100
-capex_brl                    = bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate
+capex_brl                    = scenario.capex_brl from block-sized BESS definition
 ```
+
+Payback and LCOS use a year-by-year projection. For each future calendar year,
+dispatch is re-run with that year's supplier RTE curve value; an averaged RTE is
+not used for payback.
 
 ## Implementation Strategy
 

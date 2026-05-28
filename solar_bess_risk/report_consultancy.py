@@ -24,6 +24,20 @@ from solar_bess_risk.config import CAPEX_USD_PER_KWH, HOURS_PER_YEAR
 from solar_bess_risk.simulation import DispatchResult
 
 
+def _scenario_from_data(data: tuple):
+    """Return the ScenarioDefinition appended by the main pipeline, when present."""
+    if len(data) > 8 and hasattr(data[8], "bess_energy_mwh"):
+        return data[8]
+    return None
+
+
+def _projection_from_data(data: tuple):
+    """Return the CashflowProjection appended by the main pipeline, when present."""
+    if len(data) > 9 and hasattr(data[9], "lcos_brl_per_mwh"):
+        return data[9]
+    return None
+
+
 def _hourly_mean_profile(arr: np.ndarray) -> np.ndarray:
     """Compute mean value per hour-of-day from an 8760 array."""
     reshaped = arr[:8760].reshape(365, 24)
@@ -307,20 +321,22 @@ def _build_kpi_table(
     for tab_name, data in results_by_key.items():
         dispatch, pld, gf, gen, peak_hours, duration_h = data[0], data[1], data[2], data[3], data[4], data[5]
         rte = data[7] if len(data) > 7 else 1.0
+        projection = _projection_from_data(data)
 
-        # Use actual BESS sizing from scenario (block-based)
-        from solar_bess_risk.config import BESS_BLOCK_SPECS
-        import math
-        block = BESS_BLOCK_SPECS[duration_h]
-        n_blocks = math.ceil(gf / block.block_power_mw)
-        bess_power = n_blocks * block.block_power_mw
-        bess_energy = n_blocks * block.block_energy_mwh
-
-        exp_sem = float((dispatch.deficit_mwh * pld).sum())
-        exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
-        economia = exp_sem - exp_com
-        capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
-        payback = capex_brl / economia if economia > 0 else float('inf')
+        scenario = _scenario_from_data(data)
+        if scenario is not None:
+            bess_power = scenario.bess_power_mw
+            bess_energy = scenario.bess_energy_mwh
+            capex_brl = scenario.capex_brl
+            n_blocks = round(bess_energy / 10.1)
+        else:
+            from solar_bess_risk.config import BESS_BLOCK_SPECS
+            import math
+            block = BESS_BLOCK_SPECS[duration_h]
+            n_blocks = math.ceil(gf / block.block_power_mw)
+            bess_power = n_blocks * block.block_power_mw
+            bess_energy = n_blocks * block.block_energy_mwh
+            capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
 
         # Net balance (signed: positive = surplus, negative = exposure)
         # Sem BESS: injection = gen - curtailment (all curt is lost)
@@ -329,6 +345,15 @@ def _build_kpi_table(
         injection_com = gen - dispatch.charge_mwh - dispatch.curtailment_lost_mwh + dispatch.discharge_mwh
         net_sem = float(((injection_sem - gf) * pld).sum())
         net_com = float(((injection_com - gf) * pld).sum())
+        exp_sem = float((dispatch.deficit_mwh * pld).sum())
+        exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
+        economia = net_com - net_sem
+        payback = (
+            projection.payback_years
+            if projection is not None and projection.payback_years is not None
+            else capex_brl / economia if economia > 0 else float('inf')
+        )
+        lcos = projection.lcos_brl_per_mwh if projection is not None else None
         net_diario_sem = net_sem / 365
         net_diario_com = net_com / 365
 
@@ -343,6 +368,7 @@ def _build_kpi_table(
         missed_charge = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
 
         payback_str = f"{payback:.1f}" if payback < 100 else "n/a"
+        lcos_str = f"{lcos:,.0f}" if lcos is not None else "n/a"
 
         rows_html += f"""<tr>
             <td>{escape(tab_name)}</td>
@@ -360,6 +386,7 @@ def _build_kpi_table(
             <td>{curt_pct:.1f}%</td>
             <td>{missed_charge:,.0f}</td>
             <td>{payback_str}</td>
+            <td>{lcos_str}</td>
         </tr>"""
 
     return f"""<table class="kpi-table">
@@ -379,6 +406,7 @@ def _build_kpi_table(
         <th>Curtailment Recuperado</th>
         <th>Carga Não Realizada (MWh/ano)</th>
         <th>Payback (anos)</th>
+        <th>LCOS (R$/MWh)</th>
     </tr></thead>
     <tbody>{rows_html}</tbody>
     </table>"""
@@ -402,19 +430,36 @@ def _build_scenario_tab_content(
     peak_hours = data[4]
     duration_h = data[5]
     rte = data[7] if len(data) > 7 else 1.0
+    projection = _projection_from_data(data)
 
-    # Block-based sizing
-    block = BESS_BLOCK_SPECS[duration_h]
-    n_blocks = math.ceil(gf / block.block_power_mw)
-    bess_power = n_blocks * block.block_power_mw
-    bess_energy = n_blocks * block.block_energy_mwh
+    scenario = _scenario_from_data(data)
+    if scenario is not None:
+        block = BESS_BLOCK_SPECS[duration_h]
+        bess_power = scenario.bess_power_mw
+        bess_energy = scenario.bess_energy_mwh
+        capex_brl = scenario.capex_brl
+        n_blocks = round(bess_energy / block.block_energy_mwh)
+    else:
+        block = BESS_BLOCK_SPECS[duration_h]
+        n_blocks = math.ceil(gf / block.block_power_mw)
+        bess_power = n_blocks * block.block_power_mw
+        bess_energy = n_blocks * block.block_energy_mwh
+        capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
 
     # Compute KPIs for this scenario
     exp_sem = float((dispatch.deficit_mwh * pld).sum())
     exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
-    economia = exp_sem - exp_com
-    capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
-    payback = capex_brl / economia if economia > 0 else float('inf')
+    injection_sem = gen - dispatch.curtailment_mwh
+    injection_com = gen - dispatch.charge_mwh - dispatch.curtailment_lost_mwh + dispatch.discharge_mwh
+    net_sem = float(((injection_sem - gf) * pld).sum())
+    net_com = float(((injection_com - gf) * pld).sum())
+    economia = net_com - net_sem
+    payback = (
+        projection.payback_years
+        if projection is not None and projection.payback_years is not None
+        else capex_brl / economia if economia > 0 else float('inf')
+    )
+    lcos = projection.lcos_brl_per_mwh if projection is not None else None
     deficit_sem = dispatch.deficit_mwh.sum()
     deficit_com = dispatch.residual_deficit_mwh.sum()
     coverage = (1 - deficit_com / deficit_sem) * 100 if deficit_sem > 0 else 0
@@ -423,6 +468,7 @@ def _build_scenario_tab_content(
     curt_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
     missed_charge_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
     payback_str = f"{payback:.1f} anos" if payback < 100 else "não atingível"
+    lcos_str = f"R$ {lcos:,.0f}/MWh" if lcos is not None else "n/a"
 
     # Build charts for this scenario
     gen_chart = _build_generation_chart(gen, gf, mwac)
@@ -460,6 +506,10 @@ def _build_scenario_tab_content(
         <div class="kpi-item">
             <div class="value">{payback_str}</div>
             <div class="label">Payback</div>
+        </div>
+        <div class="kpi-item">
+            <div class="value">{lcos_str}</div>
+            <div class="label">LCOS</div>
         </div>
         <div class="kpi-item">
             <div class="value">{curt_pct:.1f}%</div>
@@ -541,9 +591,10 @@ def build_consultancy_report(
 
     if charge_mode == 3:
         charge_mode_desc = (
-            "<strong>Arbitragem de Preço (Modo 3):</strong> O BESS descarrega nas N horas "
-            "de maior PLD do dia (N = duração em horas). Carrega a partir de curtailment e "
-            "excedente solar gratuitos nas demais horas. Prioriza receita máxima."
+            "<strong>Arbitragem Day-Ahead (Modo 3):</strong> O BESS otimiza pares "
+            "marginais de carga e descarga por dia, carregando quando há descarga "
+            "futura mais valiosa após RTE. A descarga acima da GF é permitida e "
+            "entra no saldo líquido quando aumenta o valor econômico."
         )
     else:
         charge_mode_desc = (
@@ -790,11 +841,11 @@ footer {{
     <h2>Conclusão e Recomendação</h2>
     <div class="conclusion">
         <strong>Conclusão:</strong> O sistema de armazenamento BESS permite reduzir significativamente
-        o risco de modulação da usina solar, descarregando em qualquer hora com déficit de garantia física
+        o risco de modulação da usina solar, descarregando nas horas de maior valor econômico
         e aproveitando curtailment que de outra forma seria perdido.
         <ul style="margin-top: 12px; padding-left: 20px;">
             <li>O BESS reduz a exposição financeira por insuficiência de garantia física</li>
-            <li>A descarga dinâmica (não restrita a janelas fixas) maximiza a utilização do BESS</li>
+            <li>A descarga dinâmica prioriza as horas de maior PLD e permite saldo positivo acima da GF</li>
             <li>Parte significativa do curtailment pode ser recuperada e monetizada</li>
             <li>A coluna "Carga Não Realizada" quantifica a limitação de carga por falta de geração solar</li>
             <li>A cobertura da garantia física aumenta substancialmente com o BESS</li>

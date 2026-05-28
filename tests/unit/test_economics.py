@@ -222,8 +222,7 @@ class TestExposureFormulas:
         )
         result = compute_scenario_economics(solar, uniform_price_profile, scenario, dispatch, params)
         expected = (
-            result.annual_exposure_without_bess_brl
-            - result.annual_exposure_with_bess_brl
+            result.net_balance_delta_brl
             - result.annual_o_and_m_brl
         )
         assert abs(result.annual_savings_brl - expected) < 1e-6
@@ -390,6 +389,62 @@ class TestCoverage:
         )
         result = compute_scenario_economics(solar, uniform_price_profile, scenario, dispatch, params)
         assert abs(result.coverage_pct - 100.0) < 1e-6
+
+
+class TestNetBalance:
+    """Signed net-balance metric complements contractual exposure reduction."""
+
+    def test_net_balance_delta_captures_discharge_above_gf_value(self, params):
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.economics import compute_scenario_economics
+        from solar_bess_risk.profile import SolarProfile
+        from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
+
+        gf = 50.0
+        generation = np.full(HOURS_PER_YEAR, gf)
+        prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+        for day in range(365):
+            start = day * 24
+            generation[start + 10] = 150.0
+            prices_arr[start + 10] = 10.0
+            generation[start + 20] = 0.0
+            prices_arr[start + 20] = 1000.0
+
+        solar = SolarProfile(
+            generation_mw=generation,
+            annual_energy_mwh=float(generation.sum()),
+            fc=0.5,
+            garantia_fisica_mw=gf,
+            csv_filename="t.csv",
+        )
+        prices = PriceProfile(
+            prices_brl_per_mwh=prices_arr,
+            source="test",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        scenario = ScenarioDefinition(
+            label="P3",
+            peak_hours=frozenset(),
+            duration_h=2,
+            bess_power_mw=gf,
+            bess_energy_mwh=gf * 2,
+            capex_brl=1.0,
+            charge_power_mw=gf,
+            rte=1.0,
+            charge_mode=3,
+        )
+
+        dispatch = simulate_scenario(solar, prices, scenario, params)
+        result = compute_scenario_economics(solar, prices, scenario, dispatch, params)
+
+        assert result.annual_gross_savings_brl > 0
+        assert result.net_balance_delta_brl > 0
+        assert abs(result.annual_gross_savings_brl - result.net_balance_delta_brl) < 1e-6
+        assert abs(result.net_balance_delta_brl - (
+            result.net_balance_com_bess_brl - result.net_balance_sem_bess_brl
+        )) < 1e-6
+        assert result.payback_years is not None
 
 
 class TestCapexFormula:

@@ -147,9 +147,9 @@ def _prompt_charge_mode() -> int:
     print("        de déficit, inclusive as mais baratas.")
     print()
     print("    [3] Arbitragem de Preço  (Recomendado)")
-    print("        O BESS descarrega nas N horas de maior PLD do dia (N = duração do BESS).")
-    print("        Prioriza receita máxima; o carregamento usa curtailment e excedente solar")
-    print("        gratuitos nas demais horas.")
+    print("        O BESS otimiza carga e descarga no horizonte day-ahead,")
+    print("        pareando carga barata com descarga futura mais valiosa.")
+    print("        Permite venda acima da GF quando isso melhora o saldo líquido.")
     print()
     while True:
         raw = input("  Selecione o modo [0/3] (padrão: 3): ").strip()

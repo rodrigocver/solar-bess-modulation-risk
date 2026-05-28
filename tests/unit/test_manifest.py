@@ -89,11 +89,11 @@ class TestWriteManifest:
             garantia_fisica_mw=25.0,
             scenarios=[
                 {"label": "A", "peak_hours": [18, 19], "duration_h": 2,
-                 "bess_power_mw": 25.0, "bess_energy_mwh": 50.0, "capex_brl": 50_000_000.0},
-                {"label": "B", "peak_hours": [17, 18, 19], "duration_h": 3,
-                 "bess_power_mw": 25.0, "bess_energy_mwh": 75.0, "capex_brl": 75_000_000.0},
-                {"label": "C", "peak_hours": [17, 18, 19, 20], "duration_h": 4,
-                 "bess_power_mw": 25.0, "bess_energy_mwh": 100.0, "capex_brl": 100_000_000.0},
+                 "bess_power_mw": 25.0, "charge_power_mw": 25.0,
+                 "bess_energy_mwh": 50.0, "capex_brl": 50_000_000.0},
+                {"label": "B", "peak_hours": [17, 18, 19, 20], "duration_h": 4,
+                 "bess_power_mw": 25.0, "charge_power_mw": 25.0,
+                 "bess_energy_mwh": 100.0, "capex_brl": 100_000_000.0},
             ],
             params={"mwac": sample_params.mwac, "bq_submarket": sample_params.bq_submarket},
             price_sources_by_year={"2025": "bigquery_pld_SE_2025"},
@@ -134,16 +134,19 @@ class TestWriteManifest:
         assert "bq_service_account_path" not in raw
         assert "service_account" not in raw
 
-    def test_scenarios_is_list_of_3_dicts(self, sample_params, tmp_path):
+    def test_scenarios_is_list_of_2_dicts(self, sample_params, tmp_path):
         manifest = self._make_manifest(sample_params)
         output_dir = tmp_path / manifest.run_id
         manifest_path = write_manifest(manifest, output_dir)
         data = json.loads(manifest_path.read_text())
 
         assert isinstance(data["scenarios"], list)
-        assert len(data["scenarios"]) == 3
+        assert len(data["scenarios"]) == 2
         for s in data["scenarios"]:
-            for key in ("label", "peak_hours", "duration_h", "bess_power_mw", "bess_energy_mwh", "capex_brl"):
+            for key in (
+                "label", "peak_hours", "duration_h", "bess_power_mw",
+                "charge_power_mw", "bess_energy_mwh", "capex_brl",
+            ):
                 assert key in s
 
     def test_manifest_contains_reproducibility_context(self, sample_params, tmp_path):

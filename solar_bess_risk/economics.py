@@ -46,9 +46,10 @@ class ScenarioResult:
     annual_exposure_with_bess_brl : float
         Annual financial exposure with BESS in BRL/yr.
     annual_savings_brl : float
-        First-year net savings from BESS in BRL/yr after fixed O&M.
+        First-year net benefit from BESS in BRL/yr after fixed O&M.
     annual_gross_savings_brl : float
-        First-year exposure reduction before fixed O&M.
+        First-year gross benefit before fixed O&M, measured as the signed
+        net-balance improvement with BESS versus without BESS.
     annual_o_and_m_brl : float
         Fixed annual O&M cost in BRL/yr.
     lifetime_net_savings_brl : float
@@ -99,6 +100,8 @@ class ScenarioResult:
     """Mean daily signed net balance without BESS (net_balance_sem / 365)."""
     net_balance_daily_com_bess_brl: float
     """Mean daily signed net balance with BESS (net_balance_com / 365)."""
+    net_balance_delta_brl: float
+    """Annual signed net-balance improvement from BESS: with BESS minus without BESS."""
 
 
 def payback_display(result: ScenarioResult) -> str:
@@ -154,17 +157,6 @@ def compute_scenario_economics(
     # Exposure with BESS: residual deficit (all hours) × PLD
     exposure_with = float(np.sum(dispatch.residual_deficit_mwh * price_arr))
 
-    gross_savings = exposure_without - exposure_with
-    annual_o_and_m = scenario.capex_brl * params.bess_o_and_m_pct_capex
-    first_year_net_savings = gross_savings - annual_o_and_m
-    lifetime_net_savings, payback = _degraded_cashflow_payback(
-        capex_brl=scenario.capex_brl,
-        gross_savings_brl=gross_savings,
-        annual_o_and_m_brl=annual_o_and_m,
-        degradation_pct_yr=params.bess_degradation_pct_yr,
-        useful_life_years=params.useful_life_years,
-    )
-
     # Coverage metrics (spec §6) — over all 8760 hours
     deficit_mwh_sem_bess = float(np.sum(dispatch.deficit_mwh))
     deficit_mwh_com_bess = float(np.sum(dispatch.residual_deficit_mwh))
@@ -195,6 +187,18 @@ def compute_scenario_economics(
 
     net_balance_sem = float(np.sum(net_hourly_sem))
     net_balance_com = float(np.sum(net_hourly_com))
+    net_balance_delta = net_balance_com - net_balance_sem
+
+    gross_savings = net_balance_delta
+    annual_o_and_m = scenario.capex_brl * params.bess_o_and_m_pct_capex
+    first_year_net_savings = gross_savings - annual_o_and_m
+    lifetime_net_savings, payback = _degraded_cashflow_payback(
+        capex_brl=scenario.capex_brl,
+        gross_savings_brl=gross_savings,
+        annual_o_and_m_brl=annual_o_and_m,
+        degradation_pct_yr=params.bess_degradation_pct_yr,
+        useful_life_years=params.useful_life_years,
+    )
 
     # Mean over 365 daily sums (same total, expressed as daily average)
     net_daily_sem = float(net_hourly_sem.reshape(365, 24).sum(axis=1).mean())
@@ -223,6 +227,7 @@ def compute_scenario_economics(
         net_balance_com_bess_brl=net_balance_com,
         net_balance_daily_sem_bess_brl=net_daily_sem,
         net_balance_daily_com_bess_brl=net_daily_com,
+        net_balance_delta_brl=net_balance_delta,
     )
 
 

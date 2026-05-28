@@ -16,7 +16,7 @@
 - Q: Which JavaScript charting library should be embedded in the self-contained HTML report? → A: Plotly.js, generated via the Python `plotly` library with the full offline bundle embedded inline.
 - Q: At what rate does the BESS charge? → A: Daytime only, from excess generation above garantia física. No grid top-up. No synthetic fallback — CSV required.
 - Resolution FR-004: BigQuery is the sole hourly price data source. If BigQuery is unavailable the run aborts immediately with a descriptive error message identifying the connection issue.
-- Resolution v2: ILR parameter removed entirely. Curtailment logic removed entirely. Grid top-up charging removed. Dispatch model replaced by garantia física physical guarantee framework with 3 fixed scenarios (A/B/C).
+- Resolution v2: ILR parameter removed entirely. Curtailment logic removed entirely. Grid top-up charging removed. Dispatch model replaced by garantia física physical guarantee framework with 2 fixed scenarios (A/B).
 
 ---
 
@@ -67,7 +67,7 @@ to simulation — delivering a complete HTML report.
 
 ---
 
-### User Story 2 — Simulate Three Fixed Scenarios (Priority: P1)
+### User Story 2 — Simulate Two Fixed Scenarios (Priority: P1)
 
 After configuration, the tool simulates three fixed BESS scenarios (A, B, C) hour by
 hour for an entire year. The engineer observes progress feedback during the run.
@@ -82,7 +82,7 @@ Verify that `annual_exposure_with_bess ≤ annual_exposure_without_bess` for eve
 **Acceptance Scenarios**:
 
 1. **Given** valid parameters and a solar profile, **When** simulation runs, **Then**
-   results are produced for exactly 3 scenarios: A (2 h), B (3 h), C (4 h).
+   results are produced for exactly 2 scenarios: A (2 h) and B (4 h).
 2. **Given** any scenario, **When** the scenario is simulated, **Then** SoC never
    exceeds `bess_energy_mwh` and never falls below 0, hour by hour.
 3. **Given** any hour h in {17, 18, 19, 20}, **When** results are examined, **Then**
@@ -227,13 +227,23 @@ interactive tooltips, all tables are present, and no browser console errors appe
   reason. The engineer MUST resolve the connectivity issue before re-running.
 - **FR-005**: The tool MUST simulate exactly three fixed scenarios:
   - Scenario A: guarantee window 18:00-20:00, peak_hour_weights = {18: 1.0, 19: 1.0}, duration = 2 h
-  - Scenario B: guarantee window 17:00-20:00, peak_hour_weights = {17: 1.0, 18: 1.0, 19: 1.0}, duration = 3 h
-  - Scenario C: guarantee window 17:00-21:00, peak_hour_weights = {17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0}, duration = 4 h
+  - Scenario B: guarantee window 17:00-21:00, peak_hour_weights = {17: 1.0, 18: 1.0, 19: 1.0, 20: 1.0}, duration = 4 h
   For each scenario:
-  - `bess_power_mw = garantia_fisica_mw`
-  - `bess_energy_mwh = garantia_fisica_mw × duration`
-  - `capex_brl = bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate`
-- **FR-006**: BESS dispatch MUST enforce hour-by-hour the following rules:
+  - `bess_power_mw` comes from the executed block-sized scenario
+  - `charge_power_mw = bess_power_mw` unless explicitly overridden
+  - `bess_energy_mwh` comes from the executed block-sized scenario
+  - `capex_brl = scenario.capex_brl`
+- **FR-006**: BESS dispatch MUST enforce hour-by-hour physical limits. In mode 3,
+  dispatch MUST use a daily day-ahead optimizer:
+  - rank feasible discharge hours by descending PLD, allowing discharge above GF;
+  - rank prior charge sources by marginal cost, with curtailment at zero cost and
+    solar charge valued at the current-hour PLD opportunity cost;
+  - accept each marginal pair only when `rte × PLD_discharge > PLD_charge`;
+  - never charge and discharge in the same hour;
+  - enforce `charge_power_mw`, `bess_power_mw`, `bess_energy_mwh`, SoC bounds and the
+    05:00 carryover drain deadline.
+
+  Legacy coverage mode MUST enforce the following rules:
 
   **Pre-computation per scenario**: Before simulation, compute
   `min_PLD_peak = min(PLD_h for all h where hour_of_day IN scenario.peak_hours)`.
@@ -243,9 +253,8 @@ interactive tooltips, all tables are present, and no browser console errors appe
   - `excess_h = max(0, generation_h − garantia_fisica_mw)`
   - **h-rule check**: charge only if `rte × min_PLD_peak > PLD_h`; otherwise sell
     excess directly to market (battery idle — `charge_h = 0`).
-  - If h-rule passes: `charge_h = min(excess_h, remaining_capacity_mwh)`
-    *(no bess_power_mw constraint on charging — duration defines energy capacity only,
-    not charge rate; the battery absorbs all capturable excess up to remaining SoC)*
+  - If h-rule passes: `charge_h = min(excess_h, charge_power_mw, remaining_capacity_mwh / rte)`
+    *(charging is capped by `charge_power_mw`, equal to PCS by default)*
   - `grid_injection_h = generation_h − charge_h`
 
   **Discharging (peak hours only — hour-of-day in scenario's peak_hours set)**:
@@ -273,14 +282,22 @@ interactive tooltips, all tables are present, and no browser console errors appe
     window, using whole-hour windows only (BRL/yr)
   - `annual_exposure_with_bess` = `Σ(residual_deficit_h × PLD_h)` for the same hours
     (BRL/yr)
-  - `annual_gross_savings` = `exposure_without − exposure_with` before fixed O&M (BRL/yr)
+  - `annual_gross_savings` = signed net-balance improvement with BESS versus without
+    BESS before fixed O&M (BRL/yr), including deficit reduction and positive surplus
+    above GF valued at PLD
   - `annual_o_and_m` = `capex_brl × bess_o_and_m_pct_capex` (BRL/yr)
   - `annual_savings` = `annual_gross_savings − annual_o_and_m` for year 1 (BRL/yr)
-  - `payback_years` = first year in the degraded cash-flow series where cumulative net
-    savings recover `capex_brl`, or "não atingível" if this does not occur in useful life
+  - `payback_years` = first year in the projected cash-flow series where cumulative net
+    savings recover `capex_brl`, or "não atingível" if this does not occur in useful life.
+    Each projected year MUST re-run dispatch with that calendar year's RTE from the
+    supplier curve; no averaged RTE may be used for payback.
+  - `lcos_brl_mwh` = `(capex_brl + fixed O&M over useful life) / lifetime discharged MWh`,
+    where lifetime discharged MWh is computed from the same year-by-year RTE projection
+    used for payback.
   - `coverage_pct` = `1 − (exposure_with / exposure_without)` × 100 (%)
 - **FR-008**: CAPEX for each scenario MUST be computed as:
-  `capex_brl = bess_energy_mwh × capex_usd_per_kwh × 1000 × usd_brl_rate`
+  `capex_brl` is taken from the executed `ScenarioDefinition`; reports and manifests
+  must not recompute it from `duration_h`.
   (converting USD/kWh → BRL/MWh via ×1000×rate, then ×MWh capacity).
 - **FR-009**: The HTML report MUST contain:
   (a) Summary table: one row per scenario (A, B, C), all 10 metrics, Portuguese headers
@@ -332,9 +349,9 @@ interactive tooltips, all tables are present, and no browser console errors appe
   `garantia_fisica_mw = mwac × fc`. Derived from CSV. Not a user input.
 - **Price Profile**: 8,760 hourly prices in BRL/MWh. Source: BigQuery PLD (CCEE table,
   submarket and year as configured). Unavailability aborts the run.
-- **BESS Unit**: Per scenario — `bess_power_mw = garantia_fisica_mw`;
-  `bess_energy_mwh = garantia_fisica_mw × duration`. Power and energy both derived.
-- **Scenario**: One of three fixed definitions (A/B/C). Each defines peak_hours set and
+- **BESS Unit**: Per scenario — block-sized `bess_power_mw`, `charge_power_mw`,
+  `bess_energy_mwh`, and `capex_brl` are stored in the executed scenario.
+- **Scenario**: One of two fixed definitions (A/B). Each defines peak_hours set and
   duration. Simulation produces an 8,760-element dispatch time-series and scalar metrics.
 - **Economic Result**: Exposure without/with BESS, savings, payback, coverage — derived
   from simulation results, CAPEX, and price profile.
@@ -383,10 +400,9 @@ interactive tooltips, all tables are present, and no browser console errors appe
   `rte × min_PLD_peak > PLD_h`; otherwise the excess is sold directly to market at the
   current hour's PLD. `min_PLD_peak` is the minimum hourly PLD across all peak hours of
   the scenario for the simulated year. Default `rte` = 0.85.
-- **Charge power is not capped at bess_power_mw**: `bess_power_mw = garantia_fisica_mw`
-  defines the *discharge* rating only (sized to meet the guarantee window). The duration
-  (2 h / 3 h / 4 h) defines energy capacity; it does not constrain the charge rate.
-  Charging is limited only by available excess and remaining SoC capacity.
+- **Charge power is capped at PCS**: `charge_power_mw` defaults to `bess_power_mw`.
+  Charging is limited by available excess/curtailment, remaining SoC capacity, and
+  the charge PCS limit.
 - ILR is NOT modelled. The tool works directly with the AC generation profile from the
   CSV without any DC/AC clipping transformation.
 - A single representative year of simulation is used. No multi-year weather or PLD

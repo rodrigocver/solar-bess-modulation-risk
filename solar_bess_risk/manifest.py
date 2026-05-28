@@ -43,7 +43,8 @@ class RunManifest:
     garantia_fisica_mw : float
         Physical guarantee in MW.
     scenarios : list[dict]
-        3 entries with label, peak_hours, duration_h, bess_power_mw, bess_energy_mwh, capex_brl.
+        Scenario entries with label, peak_hours, duration_h, bess_power_mw,
+        charge_power_mw, bess_energy_mwh, and capex_brl.
     """
 
     tool_version: str
