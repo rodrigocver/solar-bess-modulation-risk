@@ -106,13 +106,14 @@ def _build_hourly_dataframe(
 
     # Curtailment recuperado = total curtailment - curtailment perdido
     curtailment_recuperado = np.maximum(0.0, dispatch.curtailment_mwh - dispatch.curtailment_lost_mwh)
-    # Percentual de curtailment recuperado / curtailment total
+    # Fraction of curtailment recovered over total curtailment, kept in 0..1 scale.
     with np.errstate(divide='ignore', invalid='ignore'):
         curtailment_recuperado_pct = np.where(
             dispatch.curtailment_mwh > 1e-10,
-            curtailment_recuperado / dispatch.curtailment_mwh * 100.0,
+            curtailment_recuperado / dispatch.curtailment_mwh,
             0.0,
         )
+        curtailment_recuperado_pct = np.clip(curtailment_recuperado_pct, 0.0, 1.0)
         curtailment_pct = np.where(
             generation_mw > 1e-10,
             dispatch.curtailment_mwh / generation_mw * 100.0,
@@ -232,7 +233,8 @@ def _build_summary_row(
     curtailment_total = df["curtailment_mw"].sum()
     curtailment_recuperado_total = df["curtailment_recuperado_mw"].sum()
     curtailment_recuperado_pct_total = (
-        curtailment_recuperado_total / curtailment_total * 100.0 if curtailment_total > 1e-10 else 0.0
+        np.clip(curtailment_recuperado_total / curtailment_total, 0.0, 1.0)
+        if curtailment_total > 1e-10 else 0.0
     )
     geracao_total = df["geracao_solar_mw"].sum()
     curtailment_pct_total = (
@@ -260,7 +262,7 @@ def _build_summary_row(
         "curtailment_mw": round(curtailment_total),
         "curtailment_pct": round(curtailment_pct_total),
         "curtailment_recuperado_mw": round(curtailment_recuperado_total),
-        "curtailment_recuperado_pct": round(curtailment_recuperado_pct_total),
+        "curtailment_recuperado_pct": round(curtailment_recuperado_pct_total, 3),
         "curtailment_perdido_mw": round(df["curtailment_perdido_mw"].sum()),
         "carga_bess_mw": round(df["carga_bess_mw"].sum()),
         "soc_mwh": round(df["soc_mwh"].mean()),
@@ -456,7 +458,8 @@ def _build_charge_diagnostics(
             ),
             "curtailment_recuperado_mwh": round(recovered_curtailment, 3),
             "curtailment_recuperado_pct": round(
-                recovered_curtailment / total_curtailment * 100.0 if total_curtailment > 1e-9 else 0.0, 3
+                np.clip(recovered_curtailment / total_curtailment, 0.0, 1.0)
+                if total_curtailment > 1e-9 else 0.0, 3
             ),
         })
 
@@ -544,6 +547,7 @@ def build_excel_report(
     mwac: float,
     usd_brl_rate: float,
     charge_mode: int = 0,
+    block_optimization: tuple[pd.DataFrame, pd.DataFrame] | None = None,
 ) -> str:
     """Build the 9-tab Excel report.
 
@@ -605,6 +609,11 @@ def build_excel_report(
         )
         diagnostics_summary.to_excel(writer, sheet_name="diagnostico_carga", index=False)
         diagnostics_daily.to_excel(writer, sheet_name="diagnostico_diario", index=False)
+
+        if block_optimization is not None:
+            block_detail, block_recommended = block_optimization
+            block_detail.to_excel(writer, sheet_name="otimizacao_blocos", index=False)
+            block_recommended.to_excel(writer, sheet_name="otimizacao_recomendada", index=False)
 
     return str(output_path)
 

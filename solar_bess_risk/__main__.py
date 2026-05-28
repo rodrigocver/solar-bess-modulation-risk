@@ -11,6 +11,7 @@ import numpy as np
 
 from solar_bess_risk import __version__
 from solar_bess_risk.cli import run_session
+from solar_bess_risk.block_optimization import optimize_blocks_for_results
 from solar_bess_risk.config import (
     ACUMULADO_YEARS,
     BACKTEST_YEARS,
@@ -27,6 +28,7 @@ from solar_bess_risk.manifest import RunManifest, generate_run_id, hash_params, 
 from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.projection import project_cashflows_with_rte
 from solar_bess_risk.report_excel import build_excel_report, build_html_report
+from solar_bess_risk.report_optimization import build_block_optimization_html
 from solar_bess_risk.rte import get_rte_metadata, load_rte_table
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
@@ -174,6 +176,14 @@ def _build_run_manifest(
     )
 
 
+def _print_block_optimization_progress(tab_name: str, current: int, total: int, phase: str) -> None:
+    """Print compact progress for the block optimizer."""
+    if phase == "ranking":
+        print(f"  Otimizando {tab_name}: bloco {current}/{total} (ranking rápido)...")
+    else:
+        print(f"  Otimizando {tab_name}: top {current}/{total} com RTE ano a ano...")
+
+
 def main() -> None:
     """Run the full analysis pipeline."""
     print(f"\n{'='*60}")
@@ -317,8 +327,17 @@ def main() -> None:
             scenario.peak_hours, dur, 2001, rte_acum, scenario, projection,
         )
 
+    print("[4/7] Otimizando quantidade de blocos...")
+    block_optimization = optimize_blocks_for_results(
+        results_by_key=results_by_key,
+        solar=solar,
+        params=params,
+        rte_table=rte_table,
+        progress_cb=_print_block_optimization_progress,
+    )
+
     # 5. Generate reports (HTML + Excel + Consultancy report)
-    print("[4/6] Gerando relatórios...")
+    print("[5/7] Gerando relatórios...")
     run_id = generate_run_id()
     output_dir = Path("output") / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -339,8 +358,16 @@ def main() -> None:
         mwac=params.mwac,
         usd_brl_rate=params.usd_brl_rate,
         charge_mode=charge_mode,
+        block_optimization=block_optimization,
     )
     print(f"  Excel: {excel_path}")
+
+    optimization_path = build_block_optimization_html(
+        block_optimization[0],
+        block_optimization[1],
+        output_dir / "otimizacao_blocos.html",
+    )
+    print(f"  Otimização Blocos: {optimization_path}")
 
     # Consultancy-style HTML report
     from solar_bess_risk.report_consultancy import build_consultancy_report
@@ -358,7 +385,7 @@ def main() -> None:
     print(f"  Relatório Diretoria: {consultancy_path}")
 
     # 6. Write manifest
-    print("[5/6] Salvando manifest...")
+    print("[6/7] Salvando manifest...")
     manifest = _build_run_manifest(
         run_id=run_id,
         params=params,
@@ -377,6 +404,7 @@ def main() -> None:
     print(f"  Análise concluída!")
     print(f"  HTML: {report_path}")
     print(f"  Excel: {excel_path}")
+    print(f"  Otimização Blocos: {optimization_path}")
     print(f"  Relatório Diretoria: {consultancy_path}")
     print(f"  Run ID: {run_id}")
     print(f"{'='*60}\n")

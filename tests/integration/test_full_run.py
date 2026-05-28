@@ -400,10 +400,31 @@ class TestFullRun:
             )
         }
 
-        path = build_excel_report(results_by_key, tmp_path / "report.xlsx", 100.0, 5.0)
+        import pandas as pd
+
+        block_detail = pd.DataFrame([
+            {
+                "cenario": "2025-2h",
+                "n_blocos": 1,
+                "roi_vida_util": 1.2,
+                "ranking_retorno": 1,
+                "ranking_payback": 1,
+                "recomendado": True,
+            }
+        ])
+        block_recommended = block_detail.copy()
+        path = build_excel_report(
+            results_by_key,
+            tmp_path / "report.xlsx",
+            100.0,
+            5.0,
+            block_optimization=(block_detail, block_recommended),
+        )
         wb = load_workbook(path, data_only=True)
         assert "diagnostico_carga" in wb.sheetnames
         assert "diagnostico_diario" in wb.sheetnames
+        assert "otimizacao_blocos" in wb.sheetnames
+        assert "otimizacao_recomendada" in wb.sheetnames
         ws = wb["2025-2h"]
         headers = [cell.value for cell in ws[1]]
         first_data_row = 2
@@ -448,3 +469,41 @@ class TestFullRun:
         assert "gargalo_potencia_carga_mwh" in diag_headers
         assert "gargalo_janela_descarga_mwh" in diag_headers
         assert "potencial_extensao_d1_total_mwh" in diag_headers
+
+    def test_builds_block_optimization_html_report(self, tmp_path):
+        """Block optimization output creates a dedicated HTML report."""
+        import pandas as pd
+
+        from solar_bess_risk.report_optimization import build_block_optimization_html
+
+        detail = pd.DataFrame([
+            {
+                "cenario": "2026-4h",
+                "capex_scenario": "capex_-10%",
+                "n_blocos": 80,
+                "multiplo_blocos_gf": 1.1,
+                "bess_power_mw": 201.6,
+                "bess_energy_mwh": 808.0,
+                "capex_brl": 1_000_000_000.0,
+                "economia_liquida_anual_brl": 150_000_000.0,
+                "payback_anos": 6.7,
+                "lcos_brl_mwh": 300.0,
+                "roi_vida_util": 1.5,
+                "ranking_retorno": 1,
+                "ranking_payback": 1,
+                "projecao_rte_completa": True,
+                "recomendado": True,
+            }
+        ])
+        recommended = detail.copy()
+
+        path = build_block_optimization_html(
+            detail,
+            recommended,
+            tmp_path / "otimizacao_blocos.html",
+        )
+
+        content = Path(path).read_text(encoding="utf-8")
+        assert "Otimização de Blocos BESS" in content
+        assert "capex_-10%" in content
+        assert "Recomendação por Cenário e CAPEX" in content
