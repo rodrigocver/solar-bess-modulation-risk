@@ -100,21 +100,23 @@ def project_cashflows_with_rte(
         cashflow_year = start_year + offset
         rte = rte_for_year(rte_table, cashflow_year, fallback_rte)
         yearly_scenario = replace(scenario, rte=rte)
+        # Use the solar year corresponding to the battery cycle year
+        solar_year_idx = min(offset + 1, solar.n_years)
         yearly_dispatch = simulate_scenario(
             solar,
             price_profile,
             yearly_scenario,
             params,
             curtailment_series=curtailment_series,
+            solar_year_idx=solar_year_idx,
         )
 
-        injection_sem = solar.generation_mw - yearly_dispatch.curtailment_mwh
-        injection_com = (
-            solar.generation_mw
-            - yearly_dispatch.charge_mwh
-            - yearly_dispatch.curtailment_lost_mwh
-            + yearly_dispatch.discharge_mwh
-        )
+        # Year-specific net-balance calculation:
+        # sem BESS = inverter-limited generation minus ONS curtailment;
+        # com BESS = executed grid injection from the dispatch engine.
+        _gen_lim, _gen_bess = solar.get_year_arrays(solar_year_idx)
+        injection_sem = _gen_lim - yearly_dispatch.ons_curtailment_mwh
+        injection_com = yearly_dispatch.grid_injection_mwh
         gross = float(np.sum((injection_com - injection_sem) * pld))
         discharge_mwh = float(np.sum(yearly_dispatch.discharge_mwh))
         if discharge_mwh <= 1e-10 and target_lifetime_discharge > 1e-10:

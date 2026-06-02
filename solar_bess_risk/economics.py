@@ -18,6 +18,11 @@ import pandas as pd
 from solar_bess_risk.config import HOURS_PER_YEAR, PAYBACK_NOT_ACHIEVABLE, SimulationParams
 from solar_bess_risk.data_sources import PriceProfile
 from solar_bess_risk.profile import SolarProfile
+from solar_bess_risk.risk_metrics import (
+    compute_daily_delta,
+    compute_delta_sensitivity,
+    compute_var_cvar,
+)
 from solar_bess_risk.simulation import DispatchResult, ScenarioDefinition
 
 
@@ -64,6 +69,29 @@ class ScenarioResult:
         Total annual deficit MWh without BESS (all hours).
     deficit_mwh_com_bess : float
         Total annual deficit MWh with BESS (all hours).
+    daily_net_sem_brl : np.ndarray
+        Daily net balance without BESS, shape (365,), in BRL.
+    daily_net_com_brl : np.ndarray
+        Daily net balance with BESS, shape (365,), in BRL.
+    var_95_sem_bess_brl : float
+        VaR 95% of the daily net balance distribution without BESS (BRL/day).
+        Represents the worst-day loss threshold at 5th percentile.
+    cvar_95_sem_bess_brl : float
+        CVaR 95% without BESS: mean daily loss of the worst 5% of days (BRL/day).
+    var_95_com_bess_brl : float
+        VaR 95% of the daily net balance distribution with BESS (BRL/day).
+    cvar_95_com_bess_brl : float
+        CVaR 95% with BESS: mean daily loss of the worst 5% of days (BRL/day).
+    risk_constraint_met : bool
+        True when CVaR with BESS >= CVaR without BESS — i.e., adding the BESS
+        does not worsen the tail risk relative to the purely solar portfolio.
+    daily_delta : np.ndarray
+        Daily spread (BRL/MWh): mean(PLD at peak hours) - mean(PLD at off-peak).
+        Shape (365,). Positive = market paid premium at peak hours.
+    worst5pct_summary : dict
+        Portfolio performance summary on the 5% worst delta (flat-market) days.
+    best5pct_summary : dict
+        Portfolio performance summary on the 5% best delta (high-spread) days.
     """
 
     scenario: ScenarioDefinition
@@ -102,6 +130,17 @@ class ScenarioResult:
     """Mean daily signed net balance with BESS (net_balance_com / 365)."""
     net_balance_delta_brl: float
     """Annual signed net-balance improvement from BESS: with BESS minus without BESS."""
+    # --- Tail-risk metrics (VaR/CVaR at 95%) ---
+    daily_net_sem_brl: np.ndarray = None  # type: ignore[assignment]
+    daily_net_com_brl: np.ndarray = None  # type: ignore[assignment]
+    var_95_sem_bess_brl: float = 0.0
+    cvar_95_sem_bess_brl: float = 0.0
+    var_95_com_bess_brl: float = 0.0
+    cvar_95_com_bess_brl: float = 0.0
+    risk_constraint_met: bool = False
+    daily_delta: np.ndarray = None  # type: ignore[assignment]
+    worst5pct_summary: dict = None  # type: ignore[assignment]
+    best5pct_summary: dict = None  # type: ignore[assignment]
 
 
 def payback_display(result: ScenarioResult) -> str:
@@ -172,15 +211,14 @@ def compute_scenario_economics(
         reducao_exposicao = 0.0
 
     # --- Net balance (signed position) ---
-    # Sem BESS: injection = gen - curtailment (all curtailment is lost)
-    # Com BESS: injection = gen - charge - curt_lost + discharge
-    #   (curtailment charge doesn't reduce grid injection; solar charge does)
-    gen_arr = solar.generation_mw
-    curt_total = dispatch.curtailment_mwh
-    curt_lost_arr = dispatch.curtailment_lost_mwh
+    # Sem BESS uses the inverter-limited series and only external ONS curtailment.
+    # Com BESS uses the executed simulation grid injection, avoiding double
+    # counting curtailment charge versus direct solar charge.
+    gen_lim = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
+    ons_curt = dispatch.ons_curtailment_mwh
 
-    injection_sem = gen_arr - curt_total
-    injection_com = gen_arr - dispatch.charge_mwh - curt_lost_arr + dispatch.discharge_mwh
+    injection_sem = gen_lim - ons_curt
+    injection_com = dispatch.grid_injection_mwh
 
     net_hourly_sem = (injection_sem - gf) * price_arr
     net_hourly_com = (injection_com - gf) * price_arr
@@ -200,9 +238,26 @@ def compute_scenario_economics(
         useful_life_years=params.useful_life_years,
     )
 
+    # Full 365-day daily distributions (used for VaR/CVaR and sensitivity)
+    daily_net_sem_arr = net_hourly_sem.reshape(365, 24).sum(axis=1)
+    daily_net_com_arr = net_hourly_com.reshape(365, 24).sum(axis=1)
+
     # Mean over 365 daily sums (same total, expressed as daily average)
-    net_daily_sem = float(net_hourly_sem.reshape(365, 24).sum(axis=1).mean())
-    net_daily_com = float(net_hourly_com.reshape(365, 24).sum(axis=1).mean())
+    net_daily_sem = float(daily_net_sem_arr.mean())
+    net_daily_com = float(daily_net_com_arr.mean())
+
+    # --- Tail-risk metrics (VaR / CVaR at 95%) ---
+    var_sem, cvar_sem = compute_var_cvar(daily_net_sem_arr)
+    var_com, cvar_com = compute_var_cvar(daily_net_com_arr)
+    # Risk constraint: CVaR with BESS must be >= CVaR without BESS
+    # (less-negative = less tail risk; BESS should not amplify tail losses via idle CAPEX debt)
+    risk_constraint_met = cvar_com >= cvar_sem
+
+    # --- Delta sensitivity analysis ---
+    daily_delta_arr = compute_daily_delta(price_arr, scenario.peak_hours)
+    sensitivity = compute_delta_sensitivity(
+        daily_delta_arr, daily_net_sem_arr, daily_net_com_arr
+    )
 
     return ScenarioResult(
         scenario=scenario,
@@ -228,6 +283,17 @@ def compute_scenario_economics(
         net_balance_daily_sem_bess_brl=net_daily_sem,
         net_balance_daily_com_bess_brl=net_daily_com,
         net_balance_delta_brl=net_balance_delta,
+        # Tail-risk fields
+        daily_net_sem_brl=daily_net_sem_arr,
+        daily_net_com_brl=daily_net_com_arr,
+        var_95_sem_bess_brl=var_sem,
+        cvar_95_sem_bess_brl=cvar_sem,
+        var_95_com_bess_brl=var_com,
+        cvar_95_com_bess_brl=cvar_com,
+        risk_constraint_met=risk_constraint_met,
+        daily_delta=daily_delta_arr,
+        worst5pct_summary=sensitivity["worst"],
+        best5pct_summary=sensitivity["best"],
     )
 
 

@@ -22,12 +22,18 @@ from solar_bess_risk.config import (
     SimulationParams,
 )
 from solar_bess_risk.curtailment import get_curtailment_for_scenario
-from solar_bess_risk.data_sources import DataSourceError, PriceProfile, fetch_price_bigquery
+from solar_bess_risk.data_sources import (
+    DataSourceError,
+    PriceProfile,
+    fetch_price_bigquery,
+    load_price_local_pld,
+)
 from solar_bess_risk.manifest import RunManifest, generate_run_id, hash_params, write_manifest
 from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.projection import project_cashflows_with_rte
 from solar_bess_risk.report_excel import build_excel_report, build_html_report
 from solar_bess_risk.rte import get_rte_metadata, load_rte_table
+from solar_bess_risk.risk_metrics import compute_historical_risk_metrics
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
 
@@ -69,20 +75,40 @@ def _get_scenario_for_duration(
 
 
 def _fetch_pld_for_year(year: int, params: SimulationParams) -> PriceProfile:
-    """Fetch PLD for a given year (with projection for 2026)."""
+    """Load PLD for a given year, using local history and BigQuery only for 2026."""
     year_params = replace(params, bq_year=year)
 
+    if 2021 <= year <= 2025:
+        return load_price_local_pld(year, params.bq_submarket)
+
     if year == 2026:
-        # Use projection logic from backtest module
-        from solar_bess_risk.backtest import fetch_backtest_prices
-        result = fetch_backtest_prices(
-            year_params,
-            projection_year=2026,
-            projection_base_year=2025,
+        from solar_bess_risk.backtest import (
+            _fetch_observed_primary_series,
+            _project_partial_year_prices,
+        )
+        print("    2026: buscando PLD observado no BigQuery...")
+        observed = _fetch_observed_primary_series(year_params)
+        print(
+            f"    2026: {len(observed)} horas observadas; "
+            "completando ano com base local 2025."
+        )
+        base_profile = load_price_local_pld(2025, params.bq_submarket)
+        result = _project_partial_year_prices(
+            observed,
+            base_profile,
+            target_year=2026,
+            base_year=2025,
+            submarket=params.bq_submarket,
+        )
+        print(
+            f"    2026: série final com "
+            f"{result.metadata.observed_hours} horas observadas + "
+            f"{result.metadata.projected_hours} horas projetadas "
+            f"(fator={result.metadata.projection_factor:.4f})."
         )
         return result.profile
-    else:
-        return fetch_price_bigquery(year_params)
+
+    return fetch_price_bigquery(year_params)
 
 
 def _compute_acumulado_pld(
@@ -145,7 +171,7 @@ def _build_run_manifest(
         timestamp_iso8601=datetime.now(timezone.utc).isoformat(),
         params_sha256=hash_params(params),
         profile_source=solar.csv_filename,
-        price_source=f"bigquery_pld_{params.bq_submarket}_multi_year",
+        price_source=f"local_pld_2021_2025_plus_bigquery_{params.bq_submarket}_2026",
         fc=solar.fc,
         garantia_fisica_mw=solar.garantia_fisica_mw,
         scenarios=[scenario_map[d] for d in sorted(scenario_map)],
@@ -182,8 +208,13 @@ def main() -> None:
     print(f"{'='*60}\n")
 
     if "--help" in sys.argv or "-h" in sys.argv:
-        print("Uso: python -m solar_bess_risk [--service-account PATH] [--quick-test]")
+        print(
+            "Uso: python -m solar_bess_risk [--service-account PATH] "
+            "[--quick-test] [--skip-excel] [--director-only]"
+        )
         print("\nFerramenta de backtest solar + BESS com output HTML.")
+        print("  --skip-excel    Não gera backtest_completo.xlsx.")
+        print("  --director-only Gera apenas relatorio_diretoria.html + manifest.")
         sys.exit(0)
 
     # Parse optional flags
@@ -194,13 +225,17 @@ def main() -> None:
             sa_path = sys.argv[idx + 1]
 
     quick_test = "--quick-test" in sys.argv
+    skip_excel = "--skip-excel" in sys.argv or "--director-only" in sys.argv
+    director_only = "--director-only" in sys.argv
+    risk_max_solar_years = 3 if quick_test else None
 
     # 1. Interactive parameter collection
     if quick_test:
-        params = SimulationParams(csv_path="solar_baguacu_m2_600mw_id8.csv", mwac=600.0)
+        params = SimulationParams(csv_path="solar/solar_baguacu_m2_600mw_id2.csv", mwac=600.0)
         curtailment_enabled = True
         rte_path = "dados/11 - Envision.xlsx"
         charge_mode = 3
+        print("  Modo quick-test: risco histórico limitado a 3 anos solares.")
     else:
         params, curtailment_enabled, rte_path, charge_mode = run_session(service_account_path=sa_path)
 
@@ -226,7 +261,7 @@ def main() -> None:
     rte_metadata = get_rte_metadata(rte_path)
 
     # 3. Fetch PLD for backtest years + acumulado years
-    print("[2/5] Buscando preços PLD no BigQuery...")
+    print("[2/5] Carregando preços PLD...")
     all_years = sorted(set(BACKTEST_YEARS) | set(ACUMULADO_YEARS))
     pld_by_year: dict[int, np.ndarray] = {}
     price_sources_by_year: dict[int, str] = {}
@@ -250,7 +285,9 @@ def main() -> None:
     results_by_key: dict[str, tuple] = {}
 
     for year in BACKTEST_YEARS:
-        curt_series = get_curtailment_for_scenario(year, curtailment_enabled, solar.generation_mw)
+        # ONS curtailment is scaled by sem-BESS generation (gen_lim)
+        _gen_lim = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
+        curt_series = get_curtailment_for_scenario(year, curtailment_enabled, _gen_lim)
         pld = pld_by_year[year]
         rte_year = rte_table.get(year, rte_fallback)
 
@@ -259,20 +296,22 @@ def main() -> None:
             tab_name = f"{year}-{dur}h"
             print(f"  {tab_name} (RTE={rte_year:.4f})...")
 
+            price_source = price_sources_by_year.get(year, f"pld_{params.bq_submarket}_{year}")
+            price_profile = PriceProfile(
+                pld,
+                price_source,
+                params.bq_submarket,
+                year,
+            )
             dispatch = simulate_scenario(
                 solar,
-                PriceProfile(
-                    pld,
-                    price_sources_by_year.get(year, f"bigquery_pld_{params.bq_submarket}_{year}"),
-                    params.bq_submarket,
-                    year,
-                ),
+                price_profile,
                 scenario, params, curtailment_series=curt_series,
             )
             projection = project_cashflows_with_rte(
                 solar=solar,
                 pld=pld,
-                price_source=price_sources_by_year.get(year, f"bigquery_pld_{params.bq_submarket}_{year}"),
+                price_source=price_source,
                 bq_submarket=params.bq_submarket,
                 scenario=scenario,
                 params=params,
@@ -280,32 +319,43 @@ def main() -> None:
                 rte_table=rte_table,
                 start_year=year,
             )
+            risk_metrics = compute_historical_risk_metrics(
+                solar=solar,
+                prices=price_profile,
+                scenario=scenario,
+                params=params,
+                curtailment_series=curt_series,
+                max_solar_years=risk_max_solar_years,
+            )
             results_by_key[tab_name] = (
-                dispatch, pld, gf, solar.generation_mw,
-                scenario.peak_hours, dur, year, rte_year, scenario, projection,
+                dispatch, pld, gf, solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw,
+                scenario.peak_hours, dur, year, rte_year, scenario, projection, risk_metrics,
             )
 
     # Accumulated scenarios
-    curt_acum = get_curtailment_for_scenario(2025, curtailment_enabled, solar.generation_mw)  # proxy
+    _gen_lim_acum = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
+    curt_acum = get_curtailment_for_scenario(2025, curtailment_enabled, _gen_lim_acum)  # proxy
     for dur in DURATIONS:
         scenario = _get_scenario_for_duration(dur, gf, params.usd_brl_rate, rte=rte_acum, charge_mode=charge_mode)
         tab_name = f"Acum-{dur}h"
         print(f"  {tab_name} (RTE={rte_acum:.4f})...")
 
+        acum_source = f"mixed_pld_{params.bq_submarket}_acum_2021_2026"
+        price_profile = PriceProfile(
+            acum_pld,
+            acum_source,
+            params.bq_submarket,
+            2001,
+        )
         dispatch = simulate_scenario(
             solar,
-            PriceProfile(
-                acum_pld,
-                f"bigquery_pld_{params.bq_submarket}_acum",
-                params.bq_submarket,
-                2001,
-            ),
+            price_profile,
             scenario, params, curtailment_series=curt_acum,
         )
         projection = project_cashflows_with_rte(
             solar=solar,
             pld=acum_pld,
-            price_source=f"bigquery_pld_{params.bq_submarket}_acum",
+            price_source=acum_source,
             bq_submarket=params.bq_submarket,
             scenario=scenario,
             params=params,
@@ -313,35 +363,52 @@ def main() -> None:
             rte_table=rte_table,
             start_year=min(rte_table) if rte_table else 2025,
         )
+        risk_metrics = compute_historical_risk_metrics(
+            solar=solar,
+            prices=price_profile,
+            scenario=scenario,
+            params=params,
+            curtailment_series=curt_acum,
+            max_solar_years=risk_max_solar_years,
+        )
         results_by_key[tab_name] = (
-            dispatch, acum_pld, gf, solar.generation_mw,
-            scenario.peak_hours, dur, 2001, rte_acum, scenario, projection,
+            dispatch, acum_pld, gf, solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw,
+            scenario.peak_hours, dur, 2001, rte_acum, scenario, projection, risk_metrics,
         )
 
     # 5. Generate reports (HTML + Excel + Consultancy report)
     print("[4/6] Gerando relatórios...")
     run_id = generate_run_id()
-    output_dir = Path("output") / run_id
+    project_slug = Path(params.csv_path).stem
+    output_dir = Path("output") / project_slug / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    report_path = build_html_report(
-        results_by_key,
-        output_dir / "report.html",
-        mwac=params.mwac, usd_brl_rate=params.usd_brl_rate,
-        bq_submarket=params.bq_submarket,
-        charge_mode=charge_mode,
-        rte_metadata=rte_metadata,
-    )
+    report_path: str | None = None
+    if not director_only:
+        report_path = build_html_report(
+            results_by_key,
+            output_dir / "report.html",
+            mwac=params.mwac, usd_brl_rate=params.usd_brl_rate,
+            bq_submarket=params.bq_submarket,
+            charge_mode=charge_mode,
+            rte_metadata=rte_metadata,
+        )
+        print(f"  HTML: {report_path}")
+    else:
+        print("  HTML principal: pulado (--director-only)")
 
-    # Excel with all tabs
-    excel_path = build_excel_report(
-        results_by_key,
-        output_dir / "backtest_completo.xlsx",
-        mwac=params.mwac,
-        usd_brl_rate=params.usd_brl_rate,
-        charge_mode=charge_mode,
-    )
-    print(f"  Excel: {excel_path}")
+    excel_path: str | None = None
+    if not skip_excel:
+        excel_path = build_excel_report(
+            results_by_key,
+            output_dir / "backtest_completo.xlsx",
+            mwac=params.mwac,
+            usd_brl_rate=params.usd_brl_rate,
+            charge_mode=charge_mode,
+        )
+        print(f"  Excel: {excel_path}")
+    else:
+        print("  Excel: pulado (--skip-excel/--director-only)")
 
     # Consultancy-style HTML report
     from solar_bess_risk.report_consultancy import build_consultancy_report
@@ -376,8 +443,8 @@ def main() -> None:
 
     print(f"\n{'='*60}")
     print(f"  Análise concluída!")
-    print(f"  HTML: {report_path}")
-    print(f"  Excel: {excel_path}")
+    print(f"  HTML: {report_path if report_path is not None else 'n/a'}")
+    print(f"  Excel: {excel_path if excel_path is not None else 'n/a'}")
     print(f"  Relatório Diretoria: {consultancy_path}")
     print(f"  Run ID: {run_id}")
     print(f"{'='*60}\n")

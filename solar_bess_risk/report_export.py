@@ -24,8 +24,11 @@ from solar_bess_risk.economics import (
 from solar_bess_risk.profile import SolarProfile
 from solar_bess_risk.report_charts import (
     build_capex_savings_bar_chart,
+    build_daily_distribution_chart,
+    build_delta_scatter_chart,
     build_exposure_bar_chart,
     build_payback_curve,
+    build_var_cvar_chart,
 )
 
 PREMISSAS_HTML = """
@@ -103,6 +106,95 @@ def build_top10_table_html(df: pd.DataFrame) -> str:
     return df.to_html(index=False, float_format="{:.2f}".format)
 
 
+def build_risk_table_html(results: list[ScenarioResult]) -> str:
+    """Build HTML table with VaR/CVaR 95% metrics and risk constraint status.
+
+    Parameters
+    ----------
+    results : list[ScenarioResult]
+        All scenario results.
+
+    Returns
+    -------
+    str
+        HTML table string.
+    """
+    rows = ""
+    for r in results:
+        constraint_icon = "✅" if r.risk_constraint_met else "❌"
+        rows += f"""<tr>
+<td>{r.scenario.label}</td>
+<td>{r.bess_energy_mwh:.1f}</td>
+<td>{r.var_95_sem_bess_brl:,.0f}</td>
+<td>{r.cvar_95_sem_bess_brl:,.0f}</td>
+<td>{r.var_95_com_bess_brl:,.0f}</td>
+<td>{r.cvar_95_com_bess_brl:,.0f}</td>
+<td>{constraint_icon} {"Atendida" if r.risk_constraint_met else "Não atendida"}</td>
+</tr>"""
+    return f"""<table>
+<thead><tr>
+<th>Cenário</th><th>BESS (MWh)</th>
+<th>VaR 95% s/ BESS (BRL/dia)</th><th>CVaR 95% s/ BESS (BRL/dia)</th>
+<th>VaR 95% c/ BESS (BRL/dia)</th><th>CVaR 95% c/ BESS (BRL/dia)</th>
+<th>Restrição Risco</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<p><small>VaR/CVaR positivos = dias de receita; negativos = dias de exposição.
+Restrição atendida quando CVaR com BESS ≥ CVaR sem BESS (BESS não amplia o risco de cauda).</small></p>"""
+
+
+def build_sensitivity_table_html(results: list[ScenarioResult]) -> str:
+    """Build HTML table summarising delta sensitivity analysis.
+
+    Parameters
+    ----------
+    results : list[ScenarioResult]
+        All scenario results.
+
+    Returns
+    -------
+    str
+        HTML table string with worst-5% and best-5% delta day summaries.
+    """
+    rows = ""
+    for r in results:
+        w = r.worst5pct_summary
+        b = r.best5pct_summary
+        if not w or not b:
+            continue
+        rows += f"""<tr>
+<td rowspan="2">{r.scenario.label} ({r.bess_energy_mwh:.1f} MWh)</td>
+<td>Pior 5% (delta baixo)</td>
+<td>{w["n_days"]}</td>
+<td>{w["delta_mean_brl_mwh"]:.1f}</td>
+<td>{w["net_sem_mean_brl"]:,.0f}</td>
+<td>{w["net_com_mean_brl"]:,.0f}</td>
+<td>{w["bess_improvement_mean_brl"]:,.0f}</td>
+</tr>
+<tr>
+<td>Melhor 5% (delta alto)</td>
+<td>{b["n_days"]}</td>
+<td>{b["delta_mean_brl_mwh"]:.1f}</td>
+<td>{b["net_sem_mean_brl"]:,.0f}</td>
+<td>{b["net_com_mean_brl"]:,.0f}</td>
+<td>{b["bess_improvement_mean_brl"]:,.0f}</td>
+</tr>"""
+
+    return f"""<table>
+<thead><tr>
+<th>Cenário</th><th>Cauda</th><th>Nº dias</th>
+<th>Delta médio (R$/MWh)</th>
+<th>Saldo médio s/ BESS (BRL/dia)</th>
+<th>Saldo médio c/ BESS (BRL/dia)</th>
+<th>Ganho BESS médio (BRL/dia)</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+<p><small>Delta = média do PLD nas horas de pico menos média nas horas fora de pico.
+Dias com delta baixo = mercado flat (risco de CAPEX ocioso). Dias com delta alto = arbitragem favorável.</small></p>"""
+
+
 def write_report(
     results: list[ScenarioResult],
     prices: PriceProfile,
@@ -141,13 +233,23 @@ def write_report(
         params.useful_life_years,
         params.bess_degradation_pct_yr,
     )
+    fig_var_cvar = build_var_cvar_chart(results)
+    # Distribution and delta charts for the last (most complex) BESS scenario
+    bess_result = results[-1]
+    fig_distribution = build_daily_distribution_chart(bess_result)
+    fig_delta = build_delta_scatter_chart(bess_result)
 
     chart_exposure_html = fig_exposure.to_html(full_html=False, include_plotlyjs="inline")
     chart_capex_html = fig_capex.to_html(full_html=False, include_plotlyjs=False)
     chart_payback_html = fig_payback.to_html(full_html=False, include_plotlyjs=False)
+    chart_var_cvar_html = fig_var_cvar.to_html(full_html=False, include_plotlyjs=False)
+    chart_distribution_html = fig_distribution.to_html(full_html=False, include_plotlyjs=False)
+    chart_delta_html = fig_delta.to_html(full_html=False, include_plotlyjs=False)
 
     # Build tables
     summary_html = build_summary_table_html(results, params.useful_life_years)
+    risk_html = build_risk_table_html(results)
+    sensitivity_html = build_sensitivity_table_html(results)
     top10_df = build_top10_peak_hours(results, prices)
     top10_html = build_top10_table_html(top10_df)
 
@@ -191,6 +293,23 @@ section {{ margin: 24px 0; }}
 <section>
 <h2>Resumo dos Cenários</h2>
 {summary_html}
+</section>
+
+<section>
+<h2>Risco de Cauda — VaR e CVaR 95% (BRL/dia)</h2>
+{risk_html}
+{chart_var_cvar_html}
+</section>
+
+<section>
+<h2>Distribuição Diária do Saldo Líquido — Cenário {bess_result.scenario.label}</h2>
+{chart_distribution_html}
+</section>
+
+<section>
+<h2>Sensibilidade ao Delta de PLD — Cenário {bess_result.scenario.label}</h2>
+{sensitivity_html}
+{chart_delta_html}
 </section>
 
 <section>

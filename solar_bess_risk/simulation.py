@@ -82,11 +82,18 @@ class DispatchResult:
     residual_deficit_mwh : np.ndarray
         max(0, garantia_fisica - generation - discharge) for ALL hours.
     curtailment_mwh : np.ndarray
-        Curtailment MW available at each hour, shape ``(8760,)``.
+        Total curtailable energy available at each hour, shape ``(8760,)``.
+        Backward-compatible alias for ONS curtailment + clipping.
     curtailment_lost_mwh : np.ndarray
-        Curtailment that could not be stored, shape ``(8760,)``.
+        Total curtailable energy that could not be stored, shape ``(8760,)``.
     carga_nao_realizada_diaria_mwh : np.ndarray
         Daily missed cycle: bess_energy - actual daily discharge, shape ``(365,)``.
+    ons_curtailment_mwh : np.ndarray | None
+        External ONS curtailment available before BESS recovery.
+    clipping_available_mwh : np.ndarray | None
+        Generation unlocked by BESS availability: max(gen_mw - gen_lim_mw, 0).
+    curtailment_recovered_mwh : np.ndarray | None
+        Total curtailable energy recovered by BESS charging.
     """
 
     soc_mwh: np.ndarray
@@ -98,6 +105,25 @@ class DispatchResult:
     curtailment_mwh: np.ndarray
     curtailment_lost_mwh: np.ndarray
     carga_nao_realizada_diaria_mwh: np.ndarray
+    ons_curtailment_mwh: np.ndarray | None = None
+    clipping_available_mwh: np.ndarray | None = None
+    curtailment_total_available_mwh: np.ndarray | None = None
+    curtailment_recovered_mwh: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        """Populate split curtailment arrays for older tests/callers."""
+        zeros = np.zeros_like(self.curtailment_mwh, dtype=np.float64)
+        if self.ons_curtailment_mwh is None:
+            self.ons_curtailment_mwh = self.curtailment_mwh
+        if self.clipping_available_mwh is None:
+            self.clipping_available_mwh = zeros
+        if self.curtailment_total_available_mwh is None:
+            self.curtailment_total_available_mwh = self.curtailment_mwh
+        if self.curtailment_recovered_mwh is None:
+            self.curtailment_recovered_mwh = np.maximum(
+                0.0,
+                self.curtailment_total_available_mwh - self.curtailment_lost_mwh,
+            )
 
 
 def _drain_deadline_exclusive(hour_index: int, deadline_hour: int) -> int:
@@ -143,12 +169,262 @@ def _is_pld_ranked_discharge_hour(
     return hour_index in set(selected)
 
 
+@dataclass
+class _DailyDispatchPlan:
+    """Day-ahead plan separated from chronological execution."""
+
+    charge_curt_mwh: np.ndarray
+    charge_solar_mwh: np.ndarray
+    discharge_mwh: np.ndarray
+
+
+def _empty_daily_dispatch_plan() -> _DailyDispatchPlan:
+    """Create zeroed 24-hour plan arrays for one operating day."""
+    return _DailyDispatchPlan(
+        charge_curt_mwh=np.zeros(24, dtype=np.float64),
+        charge_solar_mwh=np.zeros(24, dtype=np.float64),
+        discharge_mwh=np.zeros(24, dtype=np.float64),
+    )
+
+
+def _plan_carryover_drain(
+    plan: _DailyDispatchPlan,
+    *,
+    current_soc: float,
+    day_pld: np.ndarray,
+    day_curt: np.ndarray,
+    bess_power: float,
+    drain_deadline_hour: int,
+) -> None:
+    """Plan mandatory carryover drain before the 05:00 deadline."""
+    carryover_remaining = current_soc
+    dawn_candidates = [
+        h for h in range(drain_deadline_hour)
+        if day_curt[h] <= 1e-10
+    ]
+    for h_local in sorted(dawn_candidates, key=lambda h: (-float(day_pld[h]), h)):
+        if carryover_remaining <= 1e-10:
+            break
+        disch = min(bess_power, carryover_remaining)
+        plan.discharge_mwh[h_local] = disch
+        carryover_remaining -= disch
+
+
+def _planned_soc_after_each_hour(
+    plan: _DailyDispatchPlan,
+    *,
+    rte: float,
+    drain_deadline_hour: int,
+) -> np.ndarray:
+    """Compute planned post-deadline SoC profile for capacity checks."""
+    planned = np.zeros(24, dtype=np.float64)
+    soc_local = 0.0
+    for local_h in range(drain_deadline_hour, 24):
+        soc_local += (plan.charge_curt_mwh[local_h] + plan.charge_solar_mwh[local_h]) * rte
+        soc_local -= plan.discharge_mwh[local_h]
+        planned[local_h] = soc_local
+    return planned
+
+
+def _charge_sources_for_discharge(
+    plan: _DailyDispatchPlan,
+    *,
+    discharge_h_local: int,
+    day_gen: np.ndarray,
+    day_curt: np.ndarray,
+    day_pld: np.ndarray,
+    rte: float,
+    drain_deadline_hour: int,
+) -> list[tuple[float, int, str]]:
+    """Build charge candidates for a discharge hour, preserving current tie-breaks."""
+    charge_sources: list[tuple[float, int, str]] = []
+    for charge_h_local in range(drain_deadline_hour, discharge_h_local):
+        if charge_h_local == discharge_h_local:
+            continue
+        if day_curt[charge_h_local] - plan.charge_curt_mwh[charge_h_local] > 1e-10:
+            charge_sources.append((0.0, charge_h_local, "curtailment"))
+        if (
+            day_gen[charge_h_local] - plan.charge_solar_mwh[charge_h_local] > 1e-10
+            and rte * float(day_pld[discharge_h_local]) > float(day_pld[charge_h_local])
+        ):
+            charge_sources.append((float(day_pld[charge_h_local]), charge_h_local, "solar"))
+    return charge_sources
+
+
+def _optimise_day_ahead_plan(
+    *,
+    current_soc: float,
+    day_pld: np.ndarray,
+    day_gen: np.ndarray,
+    day_curt: np.ndarray,
+    bess_power: float,
+    charge_power: float,
+    bess_energy: float,
+    rte: float,
+    drain_deadline_hour: int,
+) -> _DailyDispatchPlan:
+    """Create a linear day-ahead charge/discharge plan for one day."""
+    plan = _empty_daily_dispatch_plan()
+    _plan_carryover_drain(
+        plan,
+        current_soc=current_soc,
+        day_pld=day_pld,
+        day_curt=day_curt,
+        bess_power=bess_power,
+        drain_deadline_hour=drain_deadline_hour,
+    )
+
+    discharge_candidates = [
+        h for h in range(drain_deadline_hour, 24)
+        if day_curt[h] <= 1e-10
+    ]
+    for discharge_h_local in sorted(
+        discharge_candidates,
+        key=lambda h: (-float(day_pld[h]), h),
+    ):
+        discharge_headroom = bess_power - plan.discharge_mwh[discharge_h_local]
+        if discharge_headroom <= 1e-10:
+            continue
+
+        charge_sources = _charge_sources_for_discharge(
+            plan,
+            discharge_h_local=discharge_h_local,
+            day_gen=day_gen,
+            day_curt=day_curt,
+            day_pld=day_pld,
+            rte=rte,
+            drain_deadline_hour=drain_deadline_hour,
+        )
+
+        for _source_cost, charge_h_local, source in sorted(charge_sources):
+            if discharge_headroom <= 1e-10:
+                break
+
+            hourly_charge_headroom = (
+                charge_power - plan.charge_curt_mwh[charge_h_local] - plan.charge_solar_mwh[charge_h_local]
+            )
+            if hourly_charge_headroom <= 1e-10:
+                continue
+
+            if source == "curtailment":
+                source_avail = day_curt[charge_h_local] - plan.charge_curt_mwh[charge_h_local]
+            else:
+                source_avail = day_gen[charge_h_local] - plan.charge_solar_mwh[charge_h_local]
+            if source_avail <= 1e-10:
+                continue
+
+            planned_soc = _planned_soc_after_each_hour(
+                plan,
+                rte=rte,
+                drain_deadline_hour=drain_deadline_hour,
+            )
+            capacity_headroom_mwh = float(
+                np.min(bess_energy - planned_soc[charge_h_local:discharge_h_local])
+            )
+            if capacity_headroom_mwh <= 1e-10:
+                continue
+
+            charge_delta = min(
+                source_avail,
+                hourly_charge_headroom,
+                capacity_headroom_mwh / rte,
+                discharge_headroom / rte,
+            )
+            if charge_delta <= 1e-10:
+                continue
+
+            discharge_delta = charge_delta * rte
+            if source == "curtailment":
+                plan.charge_curt_mwh[charge_h_local] += charge_delta
+            else:
+                plan.charge_solar_mwh[charge_h_local] += charge_delta
+            plan.discharge_mwh[discharge_h_local] += discharge_delta
+            discharge_headroom -= discharge_delta
+
+    return plan
+
+
+def _execute_price_aware_day(
+    *,
+    day: int,
+    current_soc: float,
+    plan: _DailyDispatchPlan,
+    day_gen: np.ndarray,
+    day_curt: np.ndarray,
+    gf: float,
+    bess_power: float,
+    bess_energy: float,
+    rte: float,
+    soc: np.ndarray,
+    charge: np.ndarray,
+    discharge: np.ndarray,
+    grid_inj: np.ndarray,
+    deficit: np.ndarray,
+    residual: np.ndarray,
+    curt_arr: np.ndarray,
+    curt_lost: np.ndarray,
+) -> float:
+    """Execute an already-built daily plan in chronological order."""
+    start = day * 24
+    for h_local in range(24):
+        h_global = start + h_local
+        gen_h = float(day_gen[h_local])
+        curt_h = float(day_curt[h_local])
+
+        curt_arr[h_global] = curt_h
+
+        # Deficit uses effective injection (gen minus curtailment)
+        deficit[h_global] = max(0.0, gf - max(0.0, gen_h - curt_h))
+
+        planned_discharge = plan.discharge_mwh[h_local]
+        planned_curt_charge = plan.charge_curt_mwh[h_local]
+        planned_solar_charge = plan.charge_solar_mwh[h_local]
+
+        if planned_discharge > 1e-10 and curt_h <= 1e-10:
+            curt_lost[h_global] = curt_h
+
+            disch = min(planned_discharge, bess_power, current_soc)
+            current_soc -= disch
+            discharge[h_global] = disch
+
+            grid_inj[h_global] = gen_h - curt_h + discharge[h_global]
+            residual[h_global] = max(0.0, gf - grid_inj[h_global])
+
+        elif planned_curt_charge + planned_solar_charge > 1e-10:
+            remaining_cap = bess_energy - current_soc
+            if remaining_cap > 1e-10:
+                planned_total_charge = planned_curt_charge + planned_solar_charge
+                charge_scale = min(1.0, remaining_cap / (planned_total_charge * rte))
+                ch_curt = planned_curt_charge * charge_scale
+                ch_solar = planned_solar_charge * charge_scale
+                current_soc += (ch_curt + ch_solar) * rte
+            else:
+                ch_curt = 0.0
+                ch_solar = 0.0
+
+            curt_lost[h_global] = max(0.0, curt_h - ch_curt)
+            charge[h_global] = ch_curt + ch_solar
+
+            grid_inj[h_global] = max(0.0, gen_h - curt_h - ch_solar)
+            residual[h_global] = max(0.0, gf - grid_inj[h_global])
+
+        else:
+            curt_lost[h_global] = curt_h
+            grid_inj[h_global] = max(0.0, gen_h - curt_h)
+            residual[h_global] = max(0.0, deficit[h_global])
+
+        soc[h_global] = current_soc
+
+    return current_soc
+
+
 def _simulate_price_aware_dispatch(
     solar: SolarProfile,
     prices: PriceProfile,
     scenario: ScenarioDefinition,
     params: SimulationParams,
     curtailment_series: np.ndarray | None = None,
+    solar_year_idx: int = 1,
 ) -> DispatchResult:
     """Price-aware day-ahead dispatch (charge_mode == 3).
 
@@ -190,21 +466,21 @@ def _simulate_price_aware_dispatch(
     bess_energy = scenario.bess_energy_mwh
     duration_h = scenario.duration_h
     rte = scenario.rte if scenario.rte != 1.0 else params.bess_roundtrip_efficiency
-    gen = solar.generation_mw
+    # Select the correct solar year (gen_lim=sem BESS, gen_bess=com BESS)
+    gen_lim, gen_bess = solar.get_year_arrays(solar_year_idx)
+    gen = gen_bess  # dispatch uses BESS-enabled generation
     price_arr = prices.prices_brl_per_mwh
     has_curtailment = curtailment_series is not None
-    curtailment_arr_input = (
+    ons_curt_arr = (
         np.maximum(0.0, curtailment_series)
         if has_curtailment
         else np.zeros(HOURS_PER_YEAR, dtype=np.float64)
     )
+    # Clipping energy = BESS releases inverters; treated as zero-cost curtailment
+    clip_arr = np.maximum(0.0, gen_bess - gen_lim)
+    curtailment_arr_input = ons_curt_arr + clip_arr
 
     drain_deadline_hour = 5
-    curtailment_arr_input = (
-        np.maximum(0.0, curtailment_series)
-        if has_curtailment
-        else np.zeros(HOURS_PER_YEAR, dtype=np.float64)
-    )
     soc = np.zeros(HOURS_PER_YEAR, dtype=np.float64)
     charge = np.zeros(HOURS_PER_YEAR, dtype=np.float64)
     discharge = np.zeros(HOURS_PER_YEAR, dtype=np.float64)
@@ -219,164 +495,42 @@ def _simulate_price_aware_dispatch(
     for day in range(365):
         start = day * 24
         day_pld = price_arr[start : start + 24]
-        day_gen = gen[start : start + 24]
-        day_curt = (
-            np.maximum(0.0, curtailment_series[start : start + 24])
-            if has_curtailment
-            else np.zeros(24, dtype=np.float64)
-        )
+        day_gen = gen[start : start + 24]  # gen_bess slice for dispatch
+        day_curt = curtailment_arr_input[start : start + 24]  # ons + clip combined
 
         if day == 0:
             current_soc = 0.0
 
-        charge_curt_plan = np.zeros(24, dtype=np.float64)
-        charge_solar_plan = np.zeros(24, dtype=np.float64)
-        discharge_plan = np.zeros(24, dtype=np.float64)
-
-        # ── Step 1: mandatory dawn drain of carryover SoC ───────────────────
-        carryover_remaining = current_soc
-        dawn_candidates = [
-            h for h in range(drain_deadline_hour)
-            if day_curt[h] <= 1e-10
-        ]
-        for h_local in sorted(dawn_candidates, key=lambda h: (-float(day_pld[h]), h)):
-            if carryover_remaining <= 1e-10:
-                break
-            disch = min(bess_power, carryover_remaining)
-            discharge_plan[h_local] = disch
-            carryover_remaining -= disch
-
-        # ── Step 2: marginal day-ahead optimizer after the dawn deadline ────
-        # Planning state uses only post-deadline same-day energy. Carryover is
-        # excluded because the model enforces zero SoC by 05:00.
-        def planned_soc_after_each_hour() -> np.ndarray:
-            planned = np.zeros(24, dtype=np.float64)
-            soc_local = 0.0
-            for local_h in range(drain_deadline_hour, 24):
-                soc_local += (charge_curt_plan[local_h] + charge_solar_plan[local_h]) * rte
-                soc_local -= discharge_plan[local_h]
-                planned[local_h] = soc_local
-            return planned
-
-        discharge_candidates = [
-            h for h in range(drain_deadline_hour, 24)
-            if day_curt[h] <= 1e-10
-        ]
-        for discharge_h_local in sorted(
-            discharge_candidates,
-            key=lambda h: (-float(day_pld[h]), h),
-        ):
-            discharge_headroom = bess_power - discharge_plan[discharge_h_local]
-            if discharge_headroom <= 1e-10:
-                continue
-
-            charge_sources: list[tuple[float, int, str]] = []
-            for charge_h_local in range(drain_deadline_hour, discharge_h_local):
-                if charge_h_local == discharge_h_local:
-                    continue
-                if day_curt[charge_h_local] - charge_curt_plan[charge_h_local] > 1e-10:
-                    charge_sources.append((0.0, charge_h_local, "curtailment"))
-                if (
-                    day_gen[charge_h_local] - charge_solar_plan[charge_h_local] > 1e-10
-                    and rte * float(day_pld[discharge_h_local]) > float(day_pld[charge_h_local])
-                ):
-                    charge_sources.append((float(day_pld[charge_h_local]), charge_h_local, "solar"))
-
-            for _source_cost, charge_h_local, source in sorted(charge_sources):
-                if discharge_headroom <= 1e-10:
-                    break
-
-                hourly_charge_headroom = (
-                    charge_power - charge_curt_plan[charge_h_local] - charge_solar_plan[charge_h_local]
-                )
-                if hourly_charge_headroom <= 1e-10:
-                    continue
-
-                if source == "curtailment":
-                    source_avail = day_curt[charge_h_local] - charge_curt_plan[charge_h_local]
-                else:
-                    source_avail = day_gen[charge_h_local] - charge_solar_plan[charge_h_local]
-                if source_avail <= 1e-10:
-                    continue
-
-                planned_soc = planned_soc_after_each_hour()
-                capacity_headroom_mwh = float(
-                    np.min(bess_energy - planned_soc[charge_h_local:discharge_h_local])
-                )
-                if capacity_headroom_mwh <= 1e-10:
-                    continue
-
-                charge_delta = min(
-                    source_avail,
-                    hourly_charge_headroom,
-                    capacity_headroom_mwh / rte,
-                    discharge_headroom / rte,
-                )
-                if charge_delta <= 1e-10:
-                    continue
-
-                discharge_delta = charge_delta * rte
-                if source == "curtailment":
-                    charge_curt_plan[charge_h_local] += charge_delta
-                else:
-                    charge_solar_plan[charge_h_local] += charge_delta
-                discharge_plan[discharge_h_local] += discharge_delta
-                discharge_headroom -= discharge_delta
-
-        # ── Step 3: forward pass — execute optimized plan in time order ─────
-        for h_local in range(24):
-            h_global = start + h_local
-            gen_h = float(day_gen[h_local])
-            curt_h = float(day_curt[h_local])
-
-            if has_curtailment:
-                curt_arr[h_global] = curt_h
-
-            # Deficit uses effective injection (gen minus curtailment)
-            deficit[h_global] = max(0.0, gf - max(0.0, gen_h - curt_h))
-            charge_h = 0.0
-            discharge_h = 0.0
-
-            planned_discharge = discharge_plan[h_local]
-            planned_curt_charge = charge_curt_plan[h_local]
-            planned_solar_charge = charge_solar_plan[h_local]
-
-            if planned_discharge > 1e-10 and curt_h <= 1e-10:
-                curt_lost[h_global] = curt_h
-
-                disch = min(planned_discharge, bess_power, current_soc)
-                current_soc -= disch
-                discharge[h_global] = disch
-                discharge_h = disch
-
-                grid_inj[h_global] = gen_h - curt_h + discharge[h_global]
-                residual[h_global] = max(0.0, gf - grid_inj[h_global])
-
-            elif planned_curt_charge + planned_solar_charge > 1e-10:
-                remaining_cap = bess_energy - current_soc
-                if remaining_cap > 1e-10:
-                    planned_total_charge = planned_curt_charge + planned_solar_charge
-                    charge_scale = min(1.0, remaining_cap / (planned_total_charge * rte))
-                    ch_curt = planned_curt_charge * charge_scale
-                    ch_solar = planned_solar_charge * charge_scale
-                    current_soc += (ch_curt + ch_solar) * rte
-                else:
-                    ch_curt = 0.0
-                    ch_solar = 0.0
-
-                curt_lost[h_global] = max(0.0, curt_h - ch_curt)
-                charge[h_global] = ch_curt + ch_solar
-                charge_h = charge[h_global]
-
-                grid_inj[h_global] = max(0.0, gen_h - curt_h - ch_solar)
-                residual[h_global] = max(0.0, gf - grid_inj[h_global])
-
-            else:
-                curt_lost[h_global] = curt_h
-                grid_inj[h_global] = max(0.0, gen_h - curt_h)
-                residual[h_global] = max(0.0, deficit[h_global])
-
-            soc[h_global] = current_soc
+        plan = _optimise_day_ahead_plan(
+            current_soc=current_soc,
+            day_pld=day_pld,
+            day_gen=day_gen,
+            day_curt=day_curt,
+            bess_power=bess_power,
+            charge_power=charge_power,
+            bess_energy=bess_energy,
+            rte=rte,
+            drain_deadline_hour=drain_deadline_hour,
+        )
+        current_soc = _execute_price_aware_day(
+            day=day,
+            current_soc=current_soc,
+            plan=plan,
+            day_gen=day_gen,
+            day_curt=day_curt,
+            gf=gf,
+            bess_power=bess_power,
+            bess_energy=bess_energy,
+            rte=rte,
+            soc=soc,
+            charge=charge,
+            discharge=discharge,
+            grid_inj=grid_inj,
+            deficit=deficit,
+            residual=residual,
+            curt_arr=curt_arr,
+            curt_lost=curt_lost,
+        )
 
     soc_deadline = soc[24 + drain_deadline_hour - 1 :: 24]
     if np.any(soc_deadline > 1e-9):
@@ -410,6 +564,9 @@ def _simulate_price_aware_dispatch(
         curtailment_mwh=curt_arr,
         curtailment_lost_mwh=curt_lost,
         carga_nao_realizada_diaria_mwh=carga_nao_realizada_diaria,
+        ons_curtailment_mwh=ons_curt_arr,
+        clipping_available_mwh=clip_arr,
+        curtailment_total_available_mwh=curtailment_arr_input,
     )
 
 
@@ -419,6 +576,7 @@ def simulate_scenario(
     scenario: ScenarioDefinition,
     params: SimulationParams,
     curtailment_series: np.ndarray | None = None,
+    solar_year_idx: int = 1,
 ) -> DispatchResult:
     """Simulate one BESS scenario hour-by-hour for 8,760 hours.
 
@@ -450,21 +608,25 @@ def simulate_scenario(
         Hour-by-hour dispatch results.
     """
     if scenario.charge_mode == 3:
-        return _simulate_price_aware_dispatch(solar, prices, scenario, params, curtailment_series)
+        return _simulate_price_aware_dispatch(solar, prices, scenario, params, curtailment_series, solar_year_idx)
     gf = solar.garantia_fisica_mw
     bess_power = scenario.bess_power_mw
     charge_power = scenario.charge_power_mw or scenario.bess_power_mw
     bess_energy = scenario.bess_energy_mwh
     rte = scenario.rte if scenario.rte != 1.0 else params.bess_roundtrip_efficiency
-    gen = solar.generation_mw
+    # Select the correct solar year (gen_lim=sem BESS, gen_bess=com BESS)
+    gen_lim, gen_bess = solar.get_year_arrays(solar_year_idx)
+    gen = gen_bess
     price_arr = prices.prices_brl_per_mwh
 
     has_curtailment = curtailment_series is not None
-    curtailment_arr_input = (
+    ons_curt_arr = (
         np.maximum(0.0, curtailment_series)
         if has_curtailment
         else np.zeros(HOURS_PER_YEAR, dtype=np.float64)
     )
+    clip_arr = np.maximum(0.0, gen_bess - gen_lim)
+    curtailment_arr_input = ons_curt_arr + clip_arr
 
     # Pre-compute daily h-rule thresholds for excess-solar charging.
     # Excess solar is stored only when the worst-case discharge price, after
@@ -509,11 +671,9 @@ def simulate_scenario(
         hour_of_day = h % 24
         gen_h = gen[h]
 
-        # Curtailment available this hour (must be read before deficit calculation)
-        curtailment_h = 0.0
-        if has_curtailment:
-            curtailment_h = max(0.0, curtailment_series[h])
-            curt_arr[h] = curtailment_h
+        # Curtailment available this hour (ONS + clipping) before deficit calculation.
+        curtailment_h = float(curtailment_arr_input[h])
+        curt_arr[h] = curtailment_h
 
         # Deficit for ALL hours — effective injection sem BESS = gen minus curtailment
         effective_gen_h = max(0.0, gen_h - curtailment_h)
@@ -671,6 +831,9 @@ def simulate_scenario(
         curtailment_mwh=curt_arr,
         curtailment_lost_mwh=curt_lost,
         carga_nao_realizada_diaria_mwh=carga_nao_realizada_diaria,
+        ons_curtailment_mwh=ons_curt_arr,
+        clipping_available_mwh=clip_arr,
+        curtailment_total_available_mwh=curtailment_arr_input,
     )
 
 

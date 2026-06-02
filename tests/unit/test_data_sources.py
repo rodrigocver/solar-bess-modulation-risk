@@ -31,6 +31,21 @@ def _mock_bq_rows(n: int = HOURS_PER_YEAR, price: float = 200.0):
     ]
 
 
+def _write_local_pld(path, year: int, *, price: float = 200.0, leap: bool = False):
+    start = datetime(year, 1, 1)
+    hours = 8784 if leap else HOURS_PER_YEAR
+    rows = ["MES_REFERENCIA;SUBMERCADO;PERIODO_COMERCIALIZACAO;DIA;HORA;PLD_HORA"]
+    for i in range(hours):
+        ts = start + timedelta(hours=i)
+        rows.append(
+            f"{ts:%Y%m};SUDESTE;1;{ts.day};{ts.hour};{price + ts.hour / 100:.2f}"
+        )
+        rows.append(
+            f"{ts:%Y%m};SUL;1;{ts.day};{ts.hour};999.00"
+        )
+    path.write_text("\n".join(rows), encoding="utf-8")
+
+
 class TestFetchPriceBigquery:
     """Tests for fetch_price_bigquery."""
 
@@ -142,3 +157,34 @@ def test_envision_rte_file_locks_block_and_pcs_metadata():
         "typical_block_mwh": 10.1,
         "pcs_mva": 2.52,
     }
+
+
+def test_load_price_local_pld_filters_submarket_and_returns_8760(tmp_path):
+    from solar_bess_risk.data_sources import load_price_local_pld
+
+    _write_local_pld(tmp_path / "pld_horario_2025.csv", 2025, price=123.0)
+
+    result = load_price_local_pld(2025, "SE", base_dir=tmp_path)
+
+    assert result.source == "local_pld_SE_2025"
+    assert result.bq_year == 2025
+    assert len(result.prices_brl_per_mwh) == HOURS_PER_YEAR
+    assert np.isclose(result.prices_brl_per_mwh[0], 123.0)
+    assert result.prices_brl_per_mwh.max() < 999.0
+
+
+def test_load_price_local_pld_removes_feb_29_for_leap_year(tmp_path):
+    from solar_bess_risk.data_sources import load_price_local_pld
+
+    _write_local_pld(tmp_path / "pld_horario_2024.csv", 2024, price=200.0, leap=True)
+
+    result = load_price_local_pld(2024, "SE", base_dir=tmp_path)
+
+    assert len(result.prices_brl_per_mwh) == HOURS_PER_YEAR
+
+
+def test_load_price_local_pld_missing_file_raises_datasource_error(tmp_path):
+    from solar_bess_risk.data_sources import load_price_local_pld
+
+    with pytest.raises(DataSourceError, match="PLD local não encontrado"):
+        load_price_local_pld(2025, "SE", base_dir=tmp_path)

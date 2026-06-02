@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pld-solar-monthly-modulation"
+version = "0.1.0"
+description = "Monthly solar modulation analysis against historical Brazilian PLD."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "solar-bess-risk @ file:///home/cver/projects/solar-bess-modulation-risk",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+solar-monthly-modulation = "solar_monthly_modulation.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["solar_monthly_modulation*"]

@@ -26,7 +26,7 @@ from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.rte import load_rte_table
 
 # ── Defaults fixos do projeto Baguaçu ─────────────────────────────────────────
-DEFAULT_CSV_PATH = "solar_baguacu_m2_600mw_id8.csv"
+DEFAULT_CSV_PATH = "solar/solar_baguacu_m2_600mw_id2.csv"
 DEFAULT_MWAC = 600.0
 # ──────────────────────────────────────────────────────────────────────────────
 

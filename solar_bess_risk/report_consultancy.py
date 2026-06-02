@@ -38,10 +38,67 @@ def _projection_from_data(data: tuple):
     return None
 
 
+def _risk_from_data(data: tuple):
+    """Return historical risk metrics appended by the main pipeline, when present."""
+    if len(data) > 10 and isinstance(data[10], dict):
+        return data[10]
+    return None
+
+
 def _hourly_mean_profile(arr: np.ndarray) -> np.ndarray:
     """Compute mean value per hour-of-day from an 8760 array."""
     reshaped = arr[:8760].reshape(365, 24)
     return reshaped.mean(axis=0)
+
+
+def _modulation_value_brl_per_mwh(
+    injection_mwh: np.ndarray,
+    pld_brl_per_mwh: np.ndarray,
+    gf_energy_mwh: float,
+) -> float | None:
+    """Return modulation cost per MWh of garantia física (GF).
+
+    A modulação é referenciada à **obrigação de entrega** (garantia física),
+    não à energia injetada ou gerada. O benchmark é a entrega flat da GF
+    valorizada hora-a-hora ao PLD; a energia efetivamente injetada apenas
+    *abate* esse custo:
+
+        custo_total = Σ_h (GF − injeção_h) × PLD_h
+                    = GF × PLD_médio × horas − Σ(injeção × PLD)
+
+    Normalizado pela energia de GF, em R$/MWh:
+
+        modulação = PLD_médio − Σ(injeção × PLD) / energia_GF
+
+    O custo do curtailment não é descontado aqui na base: a energia não
+    injetada simplesmente deixa de abater o custo de modulação, elevando-o
+    (a exposição financeira do curtailment é contabilizada separadamente).
+
+    Parameters
+    ----------
+    injection_mwh : np.ndarray
+        Hourly grid injection in MWh.
+    pld_brl_per_mwh : np.ndarray
+        Hourly PLD in BRL/MWh.
+    gf_energy_mwh : float
+        Garantia física energy over the period (GF_mw × horas).
+
+    Returns
+    -------
+    float | None
+        Modulation cost in BRL per MWh of GF, or None when GF energy is zero.
+    """
+    if gf_energy_mwh <= 1e-10:
+        return None
+    captured_vs_gf = float(np.sum(injection_mwh * pld_brl_per_mwh) / gf_energy_mwh)
+    return float(np.mean(pld_brl_per_mwh) - captured_vs_gf)
+
+
+def _format_optional_brl_mwh(value: float | None) -> str:
+    """Format an optional BRL/MWh value for report tables."""
+    if value is None or not np.isfinite(value):
+        return "n/a"
+    return f"{value:,.2f}"
 
 
 def _build_generation_chart(
@@ -322,6 +379,7 @@ def _build_kpi_table(
         dispatch, pld, gf, gen, peak_hours, duration_h = data[0], data[1], data[2], data[3], data[4], data[5]
         rte = data[7] if len(data) > 7 else 1.0
         projection = _projection_from_data(data)
+        risk_metrics = _risk_from_data(data)
 
         scenario = _scenario_from_data(data)
         if scenario is not None:
@@ -339,23 +397,37 @@ def _build_kpi_table(
             capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h] * usd_brl_rate
 
         # Net balance (signed: positive = surplus, negative = exposure)
-        # Sem BESS: injection = gen - curtailment (all curt is lost)
-        # Com BESS: injection = gen - charge - curt_lost + discharge
-        injection_sem = gen - dispatch.curtailment_mwh
-        injection_com = gen - dispatch.charge_mwh - dispatch.curtailment_lost_mwh + dispatch.discharge_mwh
+        # Sem BESS: inverter-limited generation minus external ONS curtailment.
+        # Com BESS: executed grid injection from the dispatch engine.
+        injection_sem = gen - dispatch.ons_curtailment_mwh
+        injection_com = dispatch.grid_injection_mwh
+
+        # Modulação referenciada à garantia física (obrigação de entrega).
+        # custo = GF × PLD_médio − Σ(injeção × PLD), normalizado pela energia de GF.
+        # A energia injetada abate o custo; a referência é sempre a GF, não a injeção.
+        # Sem BESS: injection_sem; Com BESS: injection_com (despacho desloca entrega ao pico).
+        gf_energy = gf * HOURS_PER_YEAR
+        modulation_original = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy)
+        modulation_com_bess = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy)
+        modulation_delta = (
+            modulation_com_bess - modulation_original
+            if modulation_original is not None and modulation_com_bess is not None
+            else None
+        )
         net_sem = float(((injection_sem - gf) * pld).sum())
         net_com = float(((injection_com - gf) * pld).sum())
         exp_sem = float((dispatch.deficit_mwh * pld).sum())
         exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
+        delta_exp = exp_sem - exp_com
+        delta_exp_pct = delta_exp / exp_sem * 100.0 if abs(exp_sem) > 1e-10 else 0.0
         economia = net_com - net_sem
+        delta_saldo_pct = economia / abs(net_sem) * 100.0 if abs(net_sem) > 1e-10 else 0.0
         payback = (
             projection.payback_years
             if projection is not None and projection.payback_years is not None
             else capex_brl / economia if economia > 0 else float('inf')
         )
         lcos = projection.lcos_brl_per_mwh if projection is not None else None
-        net_diario_sem = net_sem / 365
-        net_diario_com = net_com / 365
 
         deficit_sem = dispatch.deficit_mwh.sum()
         deficit_com = dispatch.residual_deficit_mwh.sum()
@@ -371,22 +443,27 @@ def _build_kpi_table(
 
         payback_str = f"{payback:.1f}" if payback < 100 else "n/a"
         lcos_str = f"{lcos:,.0f}" if lcos is not None else "n/a"
+        cvar_sem = risk_metrics["cvar_95_sem_bess_brl"] if risk_metrics else None
+        cvar_com = risk_metrics["cvar_95_com_bess_brl"] if risk_metrics else None
+        cvar_delta = (cvar_com - cvar_sem) if cvar_sem is not None and cvar_com is not None else None
+        cvar_delta_str = f"{cvar_delta / 1e3:,.1f}" if cvar_delta is not None else "n/a"
 
         rows_html += f"""<tr>
             <td>{escape(tab_name)}</td>
             <td>{bess_power:.2f} ({n_blocks} blocos)</td>
             <td>{bess_energy:.1f}</td>
             <td>{capex_brl / 1e6:,.1f}</td>
-            <td>{exp_sem / 1e6:,.2f}</td>
-            <td>{exp_com / 1e6:,.2f}</td>
-            <td>{net_sem / 1e6:,.2f}</td>
-            <td>{net_com / 1e6:,.2f}</td>
-            <td>{net_diario_sem / 1e3:,.1f}</td>
-            <td>{net_diario_com / 1e3:,.1f}</td>
+            <td>{_format_optional_brl_mwh(modulation_original)}</td>
+            <td>{_format_optional_brl_mwh(modulation_com_bess)}</td>
+            <td>{_format_optional_brl_mwh(modulation_delta)}</td>
+            <td>{delta_exp / 1e6:,.2f}</td>
+            <td>{delta_exp_pct:,.1f}%</td>
             <td>{economia / 1e6:,.2f}</td>
+            <td>{delta_saldo_pct:,.1f}%</td>
             <td>{coverage:.1f}%</td>
             <td>{curtailment_pct:.1f}%</td>
             <td>{curt_recovered_pct:.1f}%</td>
+            <td>{cvar_delta_str}</td>
             <td>{missed_charge:,.0f}</td>
             <td>{payback_str}</td>
             <td>{lcos_str}</td>
@@ -398,16 +475,17 @@ def _build_kpi_table(
         <th>Potência BESS (MW)</th>
         <th>Energia BESS (MWh)</th>
         <th>CAPEX (R$ MM)</th>
-        <th>Exposição s/ BESS (R$ MM/ano)</th>
-        <th>Exposição c/ BESS (R$ MM/ano)</th>
-        <th title="Saldo líquido = Σ(geração − GF) × PLD. Positivo = superávit solar compensa exposição.">Saldo Líquido s/ BESS (R$ MM/ano)</th>
-        <th title="Saldo líquido incluindo impacto do BESS na injeção.">Saldo Líquido c/ BESS (R$ MM/ano)</th>
-        <th title="Média diária do saldo líquido sem BESS (R$ mil/dia)">Saldo Diário s/ BESS (R$ mil/dia)</th>
-        <th title="Média diária do saldo líquido com BESS (R$ mil/dia)">Saldo Diário c/ BESS (R$ mil/dia)</th>
-        <th>Economia (R$ MM/ano)</th>
+        <th title="Custo de modulação referenciado à garantia física, sem BESS: PLD médio − Σ(injeção sem BESS × PLD) / energia de GF.">Modulação Original (R$/MWh)</th>
+        <th title="Custo de modulação referenciado à garantia física, com BESS: PLD médio − Σ(injeção com BESS × PLD) / energia de GF.">Modulação c/ BESS (R$/MWh)</th>
+        <th title="Modulação c/ BESS menos modulação original. Negativo = BESS reduz o custo de modulação.">Δ Modulação (R$/MWh)</th>
+        <th title="Exposição sem BESS menos exposição com BESS. Positivo = redução de exposição.">Δ Exposição (R$ MM/ano)</th>
+        <th title="Δ Exposição dividido pela exposição sem BESS.">Δ Exposição (%)</th>
+        <th title="Saldo líquido com BESS menos saldo líquido sem BESS. Positivo = ganho financeiro líquido do BESS.">Δ Saldo Líquido (R$ MM/ano)</th>
+        <th title="Δ Saldo Líquido dividido pelo módulo do saldo líquido sem BESS.">Δ Saldo Líquido (%)</th>
         <th>Cobertura GF</th>
         <th>Curtailment / Geração</th>
         <th>Curtailment Recuperado</th>
+        <th>Δ CVaR 95% (R$ mil/dia)</th>
         <th>Carga Não Realizada (MWh/ano)</th>
         <th>Payback (anos)</th>
         <th>LCOS (R$/MWh)</th>
@@ -435,6 +513,7 @@ def _build_scenario_tab_content(
     duration_h = data[5]
     rte = data[7] if len(data) > 7 else 1.0
     projection = _projection_from_data(data)
+    risk_metrics = _risk_from_data(data)
 
     scenario = _scenario_from_data(data)
     if scenario is not None:
@@ -453,8 +532,8 @@ def _build_scenario_tab_content(
     # Compute KPIs for this scenario
     exp_sem = float((dispatch.deficit_mwh * pld).sum())
     exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
-    injection_sem = gen - dispatch.curtailment_mwh
-    injection_com = gen - dispatch.charge_mwh - dispatch.curtailment_lost_mwh + dispatch.discharge_mwh
+    injection_sem = gen - dispatch.ons_curtailment_mwh
+    injection_com = dispatch.grid_injection_mwh
     net_sem = float(((injection_sem - gf) * pld).sum())
     net_com = float(((injection_com - gf) * pld).sum())
     economia = net_com - net_sem
@@ -475,6 +554,12 @@ def _build_scenario_tab_content(
     missed_charge_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
     payback_str = f"{payback:.1f} anos" if payback < 100 else "não atingível"
     lcos_str = f"R$ {lcos:,.0f}/MWh" if lcos is not None else "n/a"
+    cvar_delta = (
+        risk_metrics["cvar_95_com_bess_brl"] - risk_metrics["cvar_95_sem_bess_brl"]
+        if risk_metrics else None
+    )
+    cvar_delta_str = f"R$ {cvar_delta / 1e3:,.1f} mil/dia" if cvar_delta is not None else "n/a"
+    risk_sample_str = f"{risk_metrics['n_days']:,} dias" if risk_metrics else "n/a"
 
     # Build charts for this scenario
     gen_chart = _build_generation_chart(gen, gf, mwac)
@@ -524,6 +609,10 @@ def _build_scenario_tab_content(
         <div class="kpi-item">
             <div class="value">{curt_recovered_pct:.1f}%</div>
             <div class="label">Curtailment Recuperado</div>
+        </div>
+        <div class="kpi-item">
+            <div class="value">{cvar_delta_str}</div>
+            <div class="label">Δ CVaR 95% ({risk_sample_str})</div>
         </div>
         <div class="kpi-item">
             <div class="value">{missed_charge_total:,.0f} MWh</div>

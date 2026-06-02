@@ -21,6 +21,7 @@ from solar_bess_risk.data_sources import (
     _is_leap_year,
     _result_to_dataframe,
     fetch_price_bigquery,
+    load_price_local_pld,
 )
 from solar_bess_risk.economics import compute_all_scenarios
 from solar_bess_risk.profile import load_solar_csv
@@ -234,7 +235,10 @@ def fetch_backtest_prices(
 ) -> PriceFetchResult:
     """Fetch full-year prices or complete a partial year from a base-year projection."""
     if projection_year is None or params.bq_year != projection_year:
-        profile = fetch_price_bigquery(params)
+        if 2021 <= params.bq_year <= 2025:
+            profile = load_price_local_pld(params.bq_year, params.bq_submarket)
+        else:
+            profile = fetch_price_bigquery(params)
         return PriceFetchResult(
             profile=profile,
             metadata=PriceFetchMetadata(
@@ -248,7 +252,10 @@ def fetch_backtest_prices(
         progress_cb(
             f"Projetando PLD {projection_year} com base em {projection_base_year}..."
         )
-    base_profile = fetch_price_bigquery(replace(params, bq_year=projection_base_year))
+    if 2021 <= projection_base_year <= 2025:
+        base_profile = load_price_local_pld(projection_base_year, params.bq_submarket)
+    else:
+        base_profile = fetch_price_bigquery(replace(params, bq_year=projection_base_year))
     observed = _fetch_observed_primary_series(params)
     return _project_partial_year_prices(
         observed,

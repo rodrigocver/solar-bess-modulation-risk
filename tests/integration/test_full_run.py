@@ -230,6 +230,17 @@ class TestFullRun:
         content = Path(path).read_text(encoding="utf-8")
         assert "Relatório Executivo" in content
         assert "Economia Anual" in content
+        assert "Δ Exposição (R$ MM/ano)" in content
+        assert "Δ Exposição (%)" in content
+        assert "Δ Saldo Líquido (R$ MM/ano)" in content
+        assert "Δ Saldo Líquido (%)" in content
+        assert "Modulação Original (R$/MWh)" in content
+        assert "Modulação c/ BESS (R$/MWh)" in content
+        assert "Δ Modulação (R$/MWh)" in content
+        assert "-7.50" in content
+        assert "Exposição s/ BESS (R$ MM/ano)" not in content
+        assert "Saldo Diário s/ BESS" not in content
+        assert "Saldo Diário c/ BESS" not in content
         assert "Curtailment / Geração" in content
         assert "0.4%" in content
 
@@ -278,7 +289,7 @@ class TestFullRun:
             params=ne_params,
             solar=solar,
             results_by_key=results_by_key,
-            price_sources_by_year={2025: "bigquery_pld_NE_2025"},
+            price_sources_by_year={2025: "local_pld_NE_2025"},
             rte_path="dados/11 - Envision.xlsx",
             rte_table={2025: 0.8625},
             rte_acum=0.8625,
@@ -286,9 +297,9 @@ class TestFullRun:
             rte_metadata={"typical_block_mwh": 10.1, "pcs_mva": 2.52},
         )
 
-        assert manifest.price_source == "bigquery_pld_NE_multi_year"
+        assert manifest.price_source == "local_pld_2021_2025_plus_bigquery_NE_2026"
         assert manifest.params["bq_submarket"] == "NE"
-        assert manifest.price_sources_by_year == {"2025": "bigquery_pld_NE_2025"}
+        assert manifest.price_sources_by_year == {"2025": "local_pld_NE_2025"}
         assert manifest.scenarios[0]["bess_power_mw"] == 25.0
         assert manifest.scenarios[0]["bess_energy_mwh"] == 50.0
         assert manifest.rte["metadata"]["pcs_mva"] == 2.52

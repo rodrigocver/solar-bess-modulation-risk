@@ -33,6 +33,13 @@ def _projection_from_data(data: tuple):
     return None
 
 
+def _risk_from_data(data: tuple):
+    """Return historical risk metrics appended by the main pipeline, when present."""
+    if len(data) > 10 and isinstance(data[10], dict):
+        return data[10]
+    return None
+
+
 def _compute_spread_column(
     charge_mwh: np.ndarray,
     discharge_mwh: np.ndarray,
@@ -90,12 +97,13 @@ def _build_hourly_dataframe(
     excesso_solar = np.maximum(0.0, generation_mw - dispatch.curtailment_mwh - garantia_fisica_mw)
 
     # Signed net balance:
-    # Sem BESS: injection = gen - curtailment (all curtailment lost)
-    # Com BESS: injection = gen - charge - curt_lost + discharge
+    # Sem BESS: inverter-limited generation minus external ONS curtailment.
+    # Com BESS: executed grid injection from the dispatch engine.
     curt_total_arr = dispatch.curtailment_mwh
     curt_lost_arr = dispatch.curtailment_lost_mwh
-    injection_sem = generation_mw - curt_total_arr
-    injection_com = generation_mw - dispatch.charge_mwh - curt_lost_arr + dispatch.discharge_mwh
+    ons_curt_arr = dispatch.ons_curtailment_mwh
+    injection_sem = generation_mw - ons_curt_arr
+    injection_com = dispatch.grid_injection_mwh
     saldo_liquido_sem = (injection_sem - garantia_fisica_mw) * pld
     saldo_liquido_com = (injection_com - garantia_fisica_mw) * pld
     exposicao_sem = dispatch.deficit_mwh * pld
@@ -105,7 +113,7 @@ def _build_hourly_dataframe(
     spread = _compute_spread_column(dispatch.charge_mwh, dispatch.discharge_mwh, pld)
 
     # Curtailment recuperado = total curtailment - curtailment perdido
-    curtailment_recuperado = np.maximum(0.0, dispatch.curtailment_mwh - dispatch.curtailment_lost_mwh)
+    curtailment_recuperado = dispatch.curtailment_recovered_mwh
     # Percentual de curtailment recuperado / curtailment total
     with np.errstate(divide='ignore', invalid='ignore'):
         curtailment_recuperado_pct = np.where(
@@ -194,6 +202,7 @@ def _build_summary_row(
     charge_mode: int = 0,
     scenario=None,
     projection=None,
+    risk_metrics: dict | None = None,
 ) -> dict:
     """Build the summary row (line 8762) for a tab."""
     economia_anual = df["economia_hora_r"].sum()
@@ -303,6 +312,15 @@ def _build_summary_row(
             bool(cycle_life_reached) if cycle_life_reached is not None else ""
         ),
     }
+    if risk_metrics:
+        row.update({
+            "var_95_sem_bess_brl_dia": round(risk_metrics["var_95_sem_bess_brl"], 2),
+            "cvar_95_sem_bess_brl_dia": round(risk_metrics["cvar_95_sem_bess_brl"], 2),
+            "var_95_com_bess_brl_dia": round(risk_metrics["var_95_com_bess_brl"], 2),
+            "cvar_95_com_bess_brl_dia": round(risk_metrics["cvar_95_com_bess_brl"], 2),
+            "risco_cvar_atendido": bool(risk_metrics["risk_constraint_met"]),
+            "risco_dias_amostra": int(risk_metrics["n_days"]),
+        })
     return row
 
 
@@ -614,6 +632,7 @@ def build_excel_report(
             rte = data[7] if len(data) > 7 else 1.0
             scenario = _scenario_from_data(data)
             projection = _projection_from_data(data)
+            risk_metrics = _risk_from_data(data)
 
             df = _build_hourly_dataframe(dispatch, pld, gf, gen, peak_hours, year_label)
             excel_df = _add_excel_only_columns(
@@ -629,7 +648,7 @@ def build_excel_report(
             summary = _build_summary_row(
                 df, gf, duration_h, usd_brl_rate, mwac,
                 rte=rte, dispatch=dispatch, charge_mode=charge_mode, scenario=scenario,
-                projection=projection,
+                projection=projection, risk_metrics=risk_metrics,
             )
             for metadata_col in ("modo_operacao", "bess_power_mw", "bess_energy_mwh", "capex_brl", "rte"):
                 summary[metadata_col] = ""
@@ -673,11 +692,12 @@ def build_html_report(
         rte = data[7] if len(data) > 7 else 1.0
         scenario = _scenario_from_data(data)
         projection = _projection_from_data(data)
+        risk_metrics = _risk_from_data(data)
         df = _build_hourly_dataframe(dispatch, pld, gf, gen, peak_hours, year_label)
         summary = _build_summary_row(
             df, gf, duration_h, usd_brl_rate, mwac,
             rte=rte, dispatch=dispatch, charge_mode=charge_mode, scenario=scenario,
-            projection=projection,
+            projection=projection, risk_metrics=risk_metrics,
         )
         summary["cenario"] = tab_name
         summary["capex_usd_kwh"] = CAPEX_USD_PER_KWH[duration_h]
@@ -708,6 +728,9 @@ def build_html_report(
         "economia_hora_r", "spread_r_mwh", "rte",
         "payback_anos", "lcos_brl_mwh", "taxa_retorno_lcoe", "descarga_bess_mwh_vida_util",
         "anos_calendario_projetados", "vida_util_por_ciclo_atingida",
+        "var_95_sem_bess_brl_dia", "cvar_95_sem_bess_brl_dia",
+        "var_95_com_bess_brl_dia", "cvar_95_com_bess_brl_dia",
+        "risco_cvar_atendido", "risco_dias_amostra",
     ]
     summary_df = summary_df[[c for c in preferred if c in summary_df.columns]]
 

@@ -20,6 +20,7 @@ profile, so 29/Feb is removed from PLD data before validation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -59,6 +60,7 @@ BQ_LEGACY_TABLE = (
     "benchmarkingmercado.ccee_infomercado"
     ".preco_da_liquidacao_das_diferencas_pld_por_submercado_hora"
 )
+LOCAL_PLD_DIR = Path("dados/pld")
 
 # Mapeamento: código curto → nome completo usado na tabela
 _SUBMARKET_MAP: dict[str, str] = {
@@ -167,6 +169,83 @@ def _normalise_hourly_prices(
     if np.any(prices < 0):
         raise DataSourceError(f"{source_label}: BigQuery retornou preços negativos.")
     return prices
+
+
+def load_price_local_pld(
+    year: int,
+    submarket: str,
+    *,
+    base_dir: str | Path = LOCAL_PLD_DIR,
+) -> PriceProfile:
+    """Load hourly PLD from local CCEE CSV exports under ``dados/pld``."""
+    submarket_code = submarket.upper()
+    submarket_label = _SUBMARKET_MAP.get(submarket_code, submarket_code)
+    path = Path(base_dir) / f"pld_horario_{year}.csv"
+    if not path.exists():
+        raise DataSourceError(f"PLD local não encontrado: {path}")
+
+    try:
+        df = pd.read_csv(path, sep=";")
+    except Exception as exc:
+        raise DataSourceError(f"Erro ao ler PLD local {path}: {exc}") from exc
+
+    required = {"MES_REFERENCIA", "SUBMERCADO", "DIA", "HORA", "PLD_HORA"}
+    missing_cols = required.difference(df.columns)
+    if missing_cols:
+        raise DataSourceError(
+            f"{path}: colunas incompletas; faltando {sorted(missing_cols)}."
+        )
+
+    work = df.copy()
+    work["SUBMERCADO"] = work["SUBMERCADO"].astype(str).str.upper().str.strip()
+    work = work[work["SUBMERCADO"] == submarket_label].copy()
+    if work.empty:
+        raise DataSourceError(
+            f"{path}: 0 linhas para submercado={submarket_label}."
+        )
+
+    mes = work["MES_REFERENCIA"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(6)
+    work["ano"] = pd.to_numeric(mes.str[:4], errors="coerce")
+    work["mes"] = pd.to_numeric(mes.str[4:6], errors="coerce")
+    work["dia"] = pd.to_numeric(work["DIA"], errors="coerce")
+    work["hora"] = pd.to_numeric(work["HORA"], errors="coerce")
+    invalid_calendar = work[["ano", "mes", "dia", "hora"]].isna().any(axis=1)
+    if invalid_calendar.any():
+        raise DataSourceError(
+            f"{path}: {int(invalid_calendar.sum())} linhas com data/hora inválidas."
+        )
+
+    work["datetime"] = pd.to_datetime(
+        {
+            "year": work["ano"].astype(int),
+            "month": work["mes"].astype(int),
+            "day": work["dia"].astype(int),
+        },
+        errors="coerce",
+    ) + pd.to_timedelta(work["hora"].astype(int), unit="h")
+    if work["datetime"].isna().any():
+        raise DataSourceError(
+            f"{path}: {int(work['datetime'].isna().sum())} timestamps inválidos."
+        )
+
+    prices = _normalise_hourly_prices(
+        work.rename(columns={"PLD_HORA": "pld"}),
+        year=year,
+        source_label=str(path),
+        datetime_col="datetime",
+        price_col="pld",
+    )
+    print(
+        f"  PLD local {year} — arquivo={path}, submercado={submarket_label}, "
+        f"min=R${prices.min():.2f}, max=R${prices.max():.2f}, "
+        f"média=R${prices.mean():.2f}/MWh"
+    )
+    return PriceProfile(
+        prices_brl_per_mwh=prices,
+        source=f"local_pld_{submarket_code}_{year}",
+        bq_submarket=submarket_code,
+        bq_year=year,
+    )
 
 
 def _fetch_primary_prices(client, bigquery, params: SimulationParams, submarket: str) -> np.ndarray:
