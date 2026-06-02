@@ -25,9 +25,9 @@ from solar_bess_risk.config import (
 from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.rte import load_rte_table
 
-# ── Defaults fixos do projeto Baguaçu ─────────────────────────────────────────
-DEFAULT_CSV_PATH = "solar/solar_baguacu_m2_600mw_id2.csv"
-DEFAULT_MWAC = 600.0
+# ── Defaults fixos do projeto padrão ──────────────────────────────────────────
+DEFAULT_CSV_PATH = "solar/solar_getulina_ii_m8_450mw_id5.csv"
+DEFAULT_MWAC = 450.0
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -92,7 +92,7 @@ def _prompt_submarket(default: str = DEFAULT_BQ_SUBMARKET) -> str:
 def _prompt_csv_path(default: str = DEFAULT_CSV_PATH) -> str:
     """Prompt for solar CSV file path.
 
-    Defaults to ``solar_baguacu_m2_600mw_id8.csv`` na raiz do projeto.
+    Defaults to the configured project CSV path.
     Enter sem digitar aceita o default.
     """
     while True:
@@ -107,7 +107,7 @@ def _prompt_csv_path(default: str = DEFAULT_CSV_PATH) -> str:
 def _prompt_mwac(default: float = DEFAULT_MWAC) -> float:
     """Prompt for plant AC capacity.
 
-    Defaults to 600 MWac (Baguaçu). Enter sem digitar aceita o default.
+    Defaults to the configured project MWac. Enter sem digitar aceita o default.
     """
     lo, hi = PARAM_BOUNDS["mwac"]
     while True:
@@ -181,10 +181,10 @@ def run_session(service_account_path: str | None = None) -> tuple:
     # 0b. BESS dispatch mode
     charge_mode = _prompt_charge_mode()
 
-    # 1. CSV path — default: solar_baguacu_m2_600mw_id8.csv
+    # 1. CSV path — project default
     csv_path = _prompt_csv_path()
 
-    # 2. MWac — default: 600
+    # 2. MWac — project default
     mwac = _prompt_mwac()
 
     # Carrega e valida CSV imediatamente para mostrar fc/garantia_fisica

@@ -109,6 +109,29 @@ def _build_hourly_dataframe(
     exposicao_sem = dispatch.deficit_mwh * pld
     exposicao_com = dispatch.residual_deficit_mwh * pld
     economia = saldo_liquido_com - saldo_liquido_sem
+    gf_energy_hour_mwh = np.full(HOURS_PER_YEAR, garantia_fisica_mw, dtype=np.float64)
+    valor_flat_gf = gf_energy_hour_mwh * pld
+    valor_capturado_sem = injection_sem * pld
+    valor_capturado_com = injection_com * pld
+    modulacao_sem = valor_flat_gf - valor_capturado_sem
+    modulacao_com = valor_flat_gf - valor_capturado_com
+    modulacao_delta = modulacao_com - modulacao_sem
+    with np.errstate(divide='ignore', invalid='ignore'):
+        modulacao_sem_brl_mwh_gf = np.where(
+            gf_energy_hour_mwh > 1e-10,
+            modulacao_sem / gf_energy_hour_mwh,
+            0.0,
+        )
+        modulacao_com_brl_mwh_gf = np.where(
+            gf_energy_hour_mwh > 1e-10,
+            modulacao_com / gf_energy_hour_mwh,
+            0.0,
+        )
+        modulacao_delta_brl_mwh_gf = np.where(
+            gf_energy_hour_mwh > 1e-10,
+            modulacao_delta / gf_energy_hour_mwh,
+            0.0,
+        )
 
     spread = _compute_spread_column(dispatch.charge_mwh, dispatch.discharge_mwh, pld)
 
@@ -132,8 +155,10 @@ def _build_hourly_dataframe(
         "hora_dia": hora_dia,
         "dia_ano": dia_ano,
         "descarga_ativa": is_discharging,
-        "geracao_solar_mw": generation_mw,
+        "geracao_solar_com_bess_mw": generation_mw,
+        "geracao_solar_limitada_mw": generation_mw,
         "garantia_fisica_mw": garantia_fisica_mw,
+        "energia_gf_hora_mwh": gf_energy_hour_mwh,
         "injecao_sem_bess_mwh": injection_sem,
         "injecao_com_bess_mwh": injection_com,
         "excesso_solar_mw": excesso_solar,
@@ -153,6 +178,15 @@ def _build_hourly_dataframe(
         "economia_hora_r": economia,
         "saldo_liquido_horario_sem_bess_r": saldo_liquido_sem,
         "saldo_liquido_horario_com_bess_r": saldo_liquido_com,
+        "valor_flat_gf_hora_r": valor_flat_gf,
+        "valor_capturado_sem_bess_hora_r": valor_capturado_sem,
+        "valor_capturado_com_bess_hora_r": valor_capturado_com,
+        "modulacao_horaria_sem_bess_r": modulacao_sem,
+        "modulacao_horaria_com_bess_r": modulacao_com,
+        "modulacao_horaria_delta_r": modulacao_delta,
+        "modulacao_sem_bess_r_mwh_gf": modulacao_sem_brl_mwh_gf,
+        "modulacao_com_bess_r_mwh_gf": modulacao_com_brl_mwh_gf,
+        "modulacao_delta_r_mwh_gf": modulacao_delta_brl_mwh_gf,
         "saldo_liquido_diario_sem_bess_r": np.nan,
         "saldo_liquido_diario_com_bess_r": np.nan,
         "spread_r_mwh": spread,
@@ -177,6 +211,12 @@ def _build_hourly_dataframe(
         "economia_hora_r",
         "saldo_liquido_horario_sem_bess_r",
         "saldo_liquido_horario_com_bess_r",
+        "valor_flat_gf_hora_r",
+        "valor_capturado_sem_bess_hora_r",
+        "valor_capturado_com_bess_hora_r",
+        "modulacao_horaria_sem_bess_r",
+        "modulacao_horaria_com_bess_r",
+        "modulacao_horaria_delta_r",
         "saldo_liquido_diario_sem_bess_r",
         "saldo_liquido_diario_com_bess_r",
     }
@@ -212,7 +252,7 @@ def _build_summary_row(
         duration_h=duration_h,
         usd_brl_rate=usd_brl_rate,
     )
-    fc = df["geracao_solar_mw"].sum() / (mwac * HOURS_PER_YEAR)
+    fc = df["geracao_solar_com_bess_mw"].sum() / (mwac * HOURS_PER_YEAR)
 
     # Spread mean (only discharge hours)
     discharge_mask = df["descarga_bess_mw"] > 1e-10
@@ -254,7 +294,7 @@ def _build_summary_row(
     curtailment_recuperado_pct_total = (
         curtailment_recuperado_total / curtailment_total * 100.0 if curtailment_total > 1e-10 else 0.0
     )
-    geracao_total = df["geracao_solar_mw"].sum()
+    geracao_total = df["geracao_solar_com_bess_mw"].sum()
     curtailment_pct_total = (
         curtailment_total / geracao_total * 100.0 if geracao_total > 1e-10 else 0.0
     )
@@ -271,8 +311,10 @@ def _build_summary_row(
         "dia_ano": "",
         "descarga_ativa": "",
         "modo_operacao": modo_label,
-        "geracao_solar_mw": round(df["geracao_solar_mw"].sum()),
+        "geracao_solar_com_bess_mw": round(df["geracao_solar_com_bess_mw"].sum()),
+        "geracao_solar_limitada_mw": round(df["geracao_solar_limitada_mw"].sum()),
         "garantia_fisica_mw": round(garantia_fisica_mw),
+        "energia_gf_hora_mwh": round(df["energia_gf_hora_mwh"].sum()),
         "bess_power_mw": round(bess_power_mw),
         "bess_energy_mwh": round(bess_energy_mwh),
         "capex_brl": round(capex_brl),
@@ -297,6 +339,15 @@ def _build_summary_row(
         "economia_hora_r": round(economia_anual),
         "saldo_liquido_horario_sem_bess_r": round(df["saldo_liquido_horario_sem_bess_r"].sum()),
         "saldo_liquido_horario_com_bess_r": round(df["saldo_liquido_horario_com_bess_r"].sum()),
+        "valor_flat_gf_hora_r": round(df["valor_flat_gf_hora_r"].sum()),
+        "valor_capturado_sem_bess_hora_r": round(df["valor_capturado_sem_bess_hora_r"].sum()),
+        "valor_capturado_com_bess_hora_r": round(df["valor_capturado_com_bess_hora_r"].sum()),
+        "modulacao_horaria_sem_bess_r": round(df["modulacao_horaria_sem_bess_r"].sum()),
+        "modulacao_horaria_com_bess_r": round(df["modulacao_horaria_com_bess_r"].sum()),
+        "modulacao_horaria_delta_r": round(df["modulacao_horaria_delta_r"].sum()),
+        "modulacao_sem_bess_r_mwh_gf": round(df["modulacao_horaria_sem_bess_r"].sum() / (garantia_fisica_mw * HOURS_PER_YEAR), 2),
+        "modulacao_com_bess_r_mwh_gf": round(df["modulacao_horaria_com_bess_r"].sum() / (garantia_fisica_mw * HOURS_PER_YEAR), 2),
+        "modulacao_delta_r_mwh_gf": round(df["modulacao_horaria_delta_r"].sum() / (garantia_fisica_mw * HOURS_PER_YEAR), 2),
         "saldo_liquido_diario_sem_bess_r": round(df["saldo_liquido_horario_sem_bess_r"].sum() / 365),
         "saldo_liquido_diario_com_bess_r": round(df["saldo_liquido_horario_com_bess_r"].sum() / 365),
         "spread_r_mwh": round(spread_mean),
@@ -713,7 +764,8 @@ def build_html_report(
 
     summary_df = pd.DataFrame(summary_rows)
     preferred = [
-        "cenario", "modo_operacao", "geracao_solar_mw", "garantia_fisica_mw", "capex_usd_kwh",
+        "cenario", "modo_operacao", "geracao_solar_com_bess_mw", "geracao_solar_limitada_mw",
+        "garantia_fisica_mw", "energia_gf_hora_mwh", "capex_usd_kwh",
         "bess_power_mw", "bess_energy_mwh", "capex_brl",
         "injecao_sem_bess_mwh", "injecao_com_bess_mwh",
         "excesso_solar_mw", "curtailment_mw", "curtailment_pct",
@@ -724,6 +776,12 @@ def build_html_report(
         "deficit_sem_bess_mw", "deficit_com_bess_mw",
         "exposicao_sem_bess_r", "exposicao_com_bess_r",
         "saldo_liquido_horario_sem_bess_r", "saldo_liquido_horario_com_bess_r",
+        "valor_flat_gf_hora_r",
+        "valor_capturado_sem_bess_hora_r", "valor_capturado_com_bess_hora_r",
+        "modulacao_horaria_sem_bess_r", "modulacao_horaria_com_bess_r",
+        "modulacao_horaria_delta_r",
+        "modulacao_sem_bess_r_mwh_gf", "modulacao_com_bess_r_mwh_gf",
+        "modulacao_delta_r_mwh_gf",
         "saldo_liquido_diario_sem_bess_r", "saldo_liquido_diario_com_bess_r",
         "economia_hora_r", "spread_r_mwh", "rte",
         "payback_anos", "lcos_brl_mwh", "taxa_retorno_lcoe", "descarga_bess_mwh_vida_util",

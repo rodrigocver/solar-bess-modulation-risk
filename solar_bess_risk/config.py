@@ -64,6 +64,20 @@ DEFAULT_BESS_DEGRADATION_PCT_YR: float = 0.02
 DEFAULT_LCOE_DISCOUNT_RATE: float = 0.05
 
 # ---------------------------------------------------------------------------
+# MUST reduction optimizer (feature 003)
+# ---------------------------------------------------------------------------
+
+# Default project transmission usage tariff (TUSTg). Project-specific value
+# SHOULD be supplied by the user; this documented default is applied otherwise.
+DEFAULT_TUST_BRL_PER_KW_MONTH: float = 7.23  # R$/kW.month
+MONTHS_PER_YEAR: int = 12               # months/year (TUST annualisation)
+KW_PER_MW: int = 1000                   # kW/MW (TUST annualisation)
+
+# MUST reduction grid sweep (fraction of project power abdicated)
+MUST_SWEEP_MAX_PCT: float = 0.40        # fraction (0-1)
+MUST_SWEEP_STEP_PCT: float = 0.02       # fraction (0-1)
+
+# ---------------------------------------------------------------------------
 # CAPEX fixo por duração (spec v2.0 — não é mais parâmetro do usuário)
 # ---------------------------------------------------------------------------
 
@@ -106,8 +120,7 @@ CURTAILMENT_SHEET_2026: str = "previsao_futura"
 # ---------------------------------------------------------------------------
 
 BACKTEST_YEARS: list[int] = [2025, 2026]
-ACUMULADO_YEARS: list[int] = [2021, 2022, 2023, 2024, 2025, 2026]
-DURATIONS: list[int] = [2, 4]
+DURATIONS: list[int] = [4]
 
 # ---------------------------------------------------------------------------
 # Validation bounds — (min, max) inclusive
@@ -123,6 +136,10 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "bess_o_and_m_pct_capex": (0.0, 1.0),
     "bess_degradation_pct_yr": (0.0, 1.0),
     "lcoe_discount_rate": (0.0, 1.0),
+    "tust_brl_per_kw_month": (0.0, 1000.0),
+    "must_reduction_pct": (0.0, 1.0),
+    "must_sweep_max_pct": (0.0, 1.0),
+    "must_sweep_step_pct": (1e-6, 1.0),
 }
 
 VALID_BQ_SUBMARKETS: set[str] = {"SE", "S", "NE", "N"}
@@ -161,6 +178,13 @@ class SimulationParams:
     bq_service_account_path : str | None
         Path to service account JSON key; None when using ADC.
         Excluded from SHA-256 hash and manifest.
+    tust_brl_per_kw_month : float
+        Project transmission usage tariff (TUSTg) in R$/kW.month. Used by the
+        MUST reduction optimizer; defaults to the documented project default.
+    must_sweep_max_pct : float
+        Maximum MUST reduction fraction (0-1) explored by the optimizer sweep.
+    must_sweep_step_pct : float
+        Step of the MUST reduction sweep grid as a fraction (0-1).
     """
 
     csv_path: str
@@ -175,3 +199,27 @@ class SimulationParams:
     bess_degradation_pct_yr: float = DEFAULT_BESS_DEGRADATION_PCT_YR
     lcoe_discount_rate: float = DEFAULT_LCOE_DISCOUNT_RATE
     bq_service_account_path: str | None = None
+    tust_brl_per_kw_month: float = DEFAULT_TUST_BRL_PER_KW_MONTH
+    must_sweep_max_pct: float = MUST_SWEEP_MAX_PCT
+    must_sweep_step_pct: float = MUST_SWEEP_STEP_PCT
+
+    def __post_init__(self) -> None:
+        """Validate MUST/TUST optimizer fields against documented bounds.
+
+        Raises
+        ------
+        ValueError
+            If ``tust_brl_per_kw_month``, ``must_sweep_max_pct`` or
+            ``must_sweep_step_pct`` fall outside ``PARAM_BOUNDS``.
+        """
+        for field_name, value in (
+            ("tust_brl_per_kw_month", self.tust_brl_per_kw_month),
+            ("must_sweep_max_pct", self.must_sweep_max_pct),
+            ("must_sweep_step_pct", self.must_sweep_step_pct),
+        ):
+            lo, hi = PARAM_BOUNDS[field_name]
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"ERRO: {field_name}={value} fora dos limites "
+                    f"[{lo}, {hi}]."
+                )

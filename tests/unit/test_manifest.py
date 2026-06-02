@@ -71,6 +71,19 @@ class TestHashParams:
         p = SimulationParams(csv_path="/x.csv", mwac=50.0)
         assert hash_params(p) == hash_params(p)
 
+    def test_hash_includes_must_optimizer_params(self):
+        """TUST and sweep config must affect the SHA-256 (Principle IV)."""
+        base = SimulationParams(csv_path="/x.csv", mwac=50.0)
+        tust_changed = SimulationParams(
+            csv_path="/x.csv", mwac=50.0, tust_brl_per_kw_month=12.5
+        )
+        step_changed = SimulationParams(
+            csv_path="/x.csv", mwac=50.0, must_sweep_step_pct=0.05
+        )
+        assert hash_params(base) != hash_params(tust_changed)
+        assert hash_params(base) != hash_params(step_changed)
+
+
 
 class TestWriteManifest:
     """write_manifest creates output/<run-id>/manifest.json with all required fields."""
@@ -96,12 +109,11 @@ class TestWriteManifest:
             params={"mwac": sample_params.mwac, "bq_submarket": sample_params.bq_submarket},
             price_sources_by_year={"2025": "bigquery_pld_SE_2025"},
             backtest_years=[2025, 2026],
-            acumulado_years=[2021, 2022, 2023, 2024, 2025, 2026],
+            acumulado_years=None,
             curtailment={"enabled": False, "source": None},
             rte={
                 "path": "dados/11 - Envision.xlsx",
                 "table": {"2025": 0.8625},
-                "acumulado_rte": 0.85,
                 "metadata": {
                     "rte_source_file": "11 - Envision.xlsx",
                     "typical_block_mwh": 10.1,
@@ -155,8 +167,9 @@ class TestWriteManifest:
         assert data["params"]["bq_submarket"] == "SE"
         assert data["price_sources_by_year"]["2025"] == "bigquery_pld_SE_2025"
         assert data["backtest_years"] == [2025, 2026]
-        assert data["acumulado_years"] == [2021, 2022, 2023, 2024, 2025, 2026]
+        assert data["acumulado_years"] is None
         assert data["curtailment"]["enabled"] is False
+        assert "acumulado_rte" not in data["rte"]
         assert data["rte"]["metadata"]["typical_block_mwh"] == 10.1
         assert data["rte"]["metadata"]["pcs_mva"] == 2.52
 

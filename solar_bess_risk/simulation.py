@@ -418,6 +418,40 @@ def _execute_price_aware_day(
     return current_soc
 
 
+def _must_excess_curtailment(
+    gen_bess: np.ndarray,
+    ons_curt_arr: np.ndarray,
+    clip_arr: np.ndarray,
+    must_mw: float | None,
+) -> np.ndarray:
+    """Combine available curtailment with the MUST injection cap.
+
+    The MUST cap and inverter clipping both measure the top of the same
+    generation profile against different ceilings, so they are combined with
+    ``max`` (not summed) to avoid double-counting the same energy.
+
+    Parameters
+    ----------
+    gen_bess : np.ndarray
+        BESS-enabled generation per hour in MW, shape ``(8760,)``.
+    ons_curt_arr : np.ndarray
+        External ONS curtailment available per hour in MW.
+    clip_arr : np.ndarray
+        Inverter clipping released by the BESS per hour in MW.
+    must_mw : float | None
+        MUST injection cap in MW. ``None`` disables the cap (legacy behavior).
+
+    Returns
+    -------
+    np.ndarray
+        Total available curtailment per hour in MW.
+    """
+    if must_mw is None or not np.isfinite(must_mw):
+        return ons_curt_arr + clip_arr
+    must_excess = np.maximum(0.0, gen_bess - must_mw)
+    return ons_curt_arr + np.maximum(clip_arr, must_excess)
+
+
 def _simulate_price_aware_dispatch(
     solar: SolarProfile,
     prices: PriceProfile,
@@ -425,6 +459,7 @@ def _simulate_price_aware_dispatch(
     params: SimulationParams,
     curtailment_series: np.ndarray | None = None,
     solar_year_idx: int = 1,
+    must_mw: float | None = None,
 ) -> DispatchResult:
     """Price-aware day-ahead dispatch (charge_mode == 3).
 
@@ -454,6 +489,10 @@ def _simulate_price_aware_dispatch(
         Simulation parameters (RTE comes from here unless overridden on scenario).
     curtailment_series : np.ndarray | None
         Optional 8760-element curtailment array.
+    must_mw : float | None
+        MUST injection cap in MW. ``None`` disables the cap (legacy behavior).
+        When set, hourly generation above ``must_mw`` is treated as available
+        curtailment (combined with clipping via ``max``, not summed).
 
     Returns
     -------
@@ -478,7 +517,9 @@ def _simulate_price_aware_dispatch(
     )
     # Clipping energy = BESS releases inverters; treated as zero-cost curtailment
     clip_arr = np.maximum(0.0, gen_bess - gen_lim)
-    curtailment_arr_input = ons_curt_arr + clip_arr
+    curtailment_arr_input = _must_excess_curtailment(
+        gen_bess, ons_curt_arr, clip_arr, must_mw
+    )
 
     drain_deadline_hour = 5
     soc = np.zeros(HOURS_PER_YEAR, dtype=np.float64)
@@ -577,6 +618,7 @@ def simulate_scenario(
     params: SimulationParams,
     curtailment_series: np.ndarray | None = None,
     solar_year_idx: int = 1,
+    must_mw: float | None = None,
 ) -> DispatchResult:
     """Simulate one BESS scenario hour-by-hour for 8,760 hours.
 
@@ -601,6 +643,8 @@ def simulate_scenario(
         Simulation parameters.
     curtailment_series : np.ndarray | None
         Optional 8760-element array of curtailment MW per hour.
+    must_mw : float | None
+        MUST injection cap in MW. ``None`` disables the cap (legacy behavior).
 
     Returns
     -------
@@ -608,7 +652,9 @@ def simulate_scenario(
         Hour-by-hour dispatch results.
     """
     if scenario.charge_mode == 3:
-        return _simulate_price_aware_dispatch(solar, prices, scenario, params, curtailment_series, solar_year_idx)
+        return _simulate_price_aware_dispatch(
+            solar, prices, scenario, params, curtailment_series, solar_year_idx, must_mw
+        )
     gf = solar.garantia_fisica_mw
     bess_power = scenario.bess_power_mw
     charge_power = scenario.charge_power_mw or scenario.bess_power_mw
@@ -626,7 +672,9 @@ def simulate_scenario(
         else np.zeros(HOURS_PER_YEAR, dtype=np.float64)
     )
     clip_arr = np.maximum(0.0, gen_bess - gen_lim)
-    curtailment_arr_input = ons_curt_arr + clip_arr
+    curtailment_arr_input = _must_excess_curtailment(
+        gen_bess, ons_curt_arr, clip_arr, must_mw
+    )
 
     # Pre-compute daily h-rule thresholds for excess-solar charging.
     # Excess solar is stored only when the worst-case discharge price, after

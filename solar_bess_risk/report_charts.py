@@ -8,14 +8,20 @@ build_payback_curve(results) -> go.Figure
 build_var_cvar_chart(results) -> go.Figure
 build_daily_distribution_chart(result) -> go.Figure
 build_delta_scatter_chart(result) -> go.Figure
+must_sensitivity_chart(result) -> go.Figure
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import numpy as np
 import plotly.graph_objects as go
 
 from solar_bess_risk.economics import ScenarioResult
+
+if TYPE_CHECKING:
+    from solar_bess_risk.must_optimizer import MustOptimizationResult
 
 
 def build_exposure_bar_chart(results: list[ScenarioResult]) -> go.Figure:
@@ -338,6 +344,88 @@ def build_delta_scatter_chart(result: ScenarioResult) -> go.Figure:
         title=f"Delta PLD vs Saldo Diário — Cenário {result.scenario.label}",
         xaxis_title="Delta PLD Horário (R$/MWh) — pico vs fora de pico",
         yaxis_title="Saldo Diário (BRL)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+
+def must_sensitivity_chart(result: "MustOptimizationResult") -> go.Figure:
+    """Build the MUST reduction sensitivity curve with the optimum highlighted.
+
+    Plots net annual benefit against MUST reduction percentage for one BESS
+    scenario, marking the optimal point.
+
+    Parameters
+    ----------
+    result : MustOptimizationResult
+        Optimization result holding the full ``sweep`` and the optimum.
+
+    Returns
+    -------
+    go.Figure
+        Plotly figure with the sensitivity curve and the optimal marker.
+    """
+    reductions_pct = [p.reduction_pct * 100.0 for p in result.sweep]
+    net_benefit = [p.net_benefit_brl_per_yr for p in result.sweep]
+    tust_savings = [p.tust_savings_brl_per_yr for p in result.sweep]
+    net_balance_delta = [
+        p.net_balance_delta_vs_baseline_brl for p in result.sweep
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=reductions_pct,
+        y=net_benefit,
+        mode="lines+markers",
+        name="Benefício líquido",
+        line=dict(color="#1f77b4", width=3),
+        marker=dict(size=6),
+        hovertemplate=(
+            "Redução de MUST: %{x:.0f}%<br>"
+            "Benefício líquido: %{y:,.0f} R$/ano<extra></extra>"
+        ),
+    ))
+    fig.add_trace(go.Scatter(
+        x=reductions_pct,
+        y=tust_savings,
+        mode="lines",
+        name="Economia de TUST",
+        line=dict(color="#2ca02c", width=1.5, dash="dot"),
+        hovertemplate=(
+            "Redução de MUST: %{x:.0f}%<br>"
+            "Economia de TUST: %{y:,.0f} R$/ano<extra></extra>"
+        ),
+    ))
+    fig.add_trace(go.Scatter(
+        x=reductions_pct,
+        y=net_balance_delta,
+        mode="lines",
+        name="Δ Saldo líquido",
+        line=dict(color="#d62728", width=1.5, dash="dot"),
+        hovertemplate=(
+            "Redução de MUST: %{x:.0f}%<br>"
+            "Δ Saldo líquido: %{y:,.0f} R$/ano<extra></extra>"
+        ),
+    ))
+    fig.add_trace(go.Scatter(
+        x=[result.optimal_reduction_pct * 100.0],
+        y=[result.optimal_net_benefit_brl_per_yr],
+        mode="markers",
+        name="Ótimo",
+        marker=dict(color="#ff7f0e", size=14, symbol="star"),
+        hovertemplate=(
+            "Ótimo<br>Redução: %{x:.0f}%<br>"
+            "Benefício: %{y:,.0f} R$/ano<extra></extra>"
+        ),
+    ))
+    fig.add_hline(y=0.0, line_dash="dash", line_color="gray")
+    fig.update_layout(
+        title=(
+            f"Sensibilidade da Redução de MUST — Cenário "
+            f"{result.scenario_label} ({result.duration_h}h)"
+        ),
+        xaxis_title="Redução de MUST (%)",
+        yaxis_title="Benefício líquido anual (R$/ano)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig

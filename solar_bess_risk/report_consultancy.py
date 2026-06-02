@@ -101,6 +101,51 @@ def _format_optional_brl_mwh(value: float | None) -> str:
     return f"{value:,.2f}"
 
 
+def _capex_brl_million_per_mwh(capex_brl: float, bess_energy_mwh: float) -> float | None:
+    """Return BESS CAPEX in BRL million per installed MWh of energy capacity."""
+    if bess_energy_mwh <= 1e-10:
+        return None
+    return float(capex_brl / 1e6 / bess_energy_mwh)
+
+
+def _build_simulation_params_table(
+    *,
+    params,
+    charge_mode: int,
+    bq_submarket: str,
+    mwac: float,
+    garantia_fisica_mw: float,
+    fc: float,
+) -> str:
+    """Build the simulation parameter table shown in the executive report."""
+    if charge_mode == 3:
+        charge_mode_label = "Modo 3 - Arbitragem day-ahead"
+    else:
+        charge_mode_label = "Modo 0 - Cobertura de deficit"
+
+    rows = [
+        ("Curva solar", getattr(params, "csv_path", "n/a")),
+        ("Capacidade AC", f"{mwac:,.1f} MW"),
+        ("Garantia fisica", f"{garantia_fisica_mw:,.1f} MW"),
+        ("Fator de capacidade", f"{fc * 100:,.2f}%"),
+        ("Submercado PLD", bq_submarket),
+        ("USD/BRL", f"{getattr(params, 'usd_brl_rate', 0.0):,.2f}"),
+        ("Modo de operacao", charge_mode_label),
+        ("Vida util economica", f"{getattr(params, 'useful_life_years', 'n/a')} anos"),
+        ("O&M anual BESS", f"{getattr(params, 'bess_o_and_m_pct_capex', 0.0) * 100:,.2f}% do CAPEX"),
+        ("Degradacao anual BESS", f"{getattr(params, 'bess_degradation_pct_yr', 0.0) * 100:,.2f}%"),
+        ("Taxa de desconto LCOS", f"{getattr(params, 'lcoe_discount_rate', 0.0) * 100:,.2f}%"),
+        ("RTE fallback", f"{getattr(params, 'bess_roundtrip_efficiency', 0.0) * 100:,.2f}%"),
+    ]
+    rows_html = "".join(
+        f"<tr><th>{escape(label)}</th><td>{escape(str(value))}</td></tr>"
+        for label, value in rows
+    )
+    return f"""<table class="params-table">
+    <tbody>{rows_html}</tbody>
+    </table>"""
+
+
 def _build_generation_chart(
     generation_mw: np.ndarray,
     garantia_fisica_mw: float,
@@ -295,35 +340,37 @@ def _build_deficit_chart(
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
-def _build_exposure_comparison_chart(
+def _build_modulation_comparison_chart(
     results_by_key: dict[str, tuple],
 ) -> str:
-    """Chart: Financial exposure comparison across all scenarios."""
+    """Chart: modulation cost comparison across all scenarios."""
     labels = []
-    exp_sem = []
-    exp_com = []
+    mod_sem = []
+    mod_com = []
 
     for tab_name, data in results_by_key.items():
-        dispatch = data[0]
-        pld = data[1]
+        dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
+        gf_energy = gf * HOURS_PER_YEAR
+        injection_sem = gen - dispatch.ons_curtailment_mwh
+        injection_com = dispatch.grid_injection_mwh
         labels.append(tab_name)
-        exp_sem.append(float((dispatch.deficit_mwh * pld).sum()))
-        exp_com.append(float((dispatch.residual_deficit_mwh * pld).sum()))
+        mod_sem.append(_modulation_value_brl_per_mwh(injection_sem, pld, gf_energy) or 0.0)
+        mod_com.append(_modulation_value_brl_per_mwh(injection_com, pld, gf_energy) or 0.0)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        name='Exposição sem BESS',
-        x=labels, y=exp_sem,
+        name='Modulação original',
+        x=labels, y=mod_sem,
         marker_color='#F44336',
     ))
     fig.add_trace(go.Bar(
-        name='Exposição com BESS',
-        x=labels, y=exp_com,
+        name='Modulação com BESS',
+        x=labels, y=mod_com,
         marker_color='#4CAF50',
     ))
     fig.update_layout(
-        title="Redução de Exposição Financeira por Cenário",
-        yaxis_title="Exposição (R$/ano)",
+        title="Redução do Custo de Modulação por Cenário",
+        yaxis_title="Modulação (R$/MWh GF)",
         barmode='group',
         template="plotly_white",
         height=450,
@@ -452,7 +499,7 @@ def _build_kpi_table(
             <td>{escape(tab_name)}</td>
             <td>{bess_power:.2f} ({n_blocks} blocos)</td>
             <td>{bess_energy:.1f}</td>
-            <td>{capex_brl / 1e6:,.1f}</td>
+            <td>{_format_optional_brl_mwh(_capex_brl_million_per_mwh(capex_brl, bess_energy))}</td>
             <td>{_format_optional_brl_mwh(modulation_original)}</td>
             <td>{_format_optional_brl_mwh(modulation_com_bess)}</td>
             <td>{_format_optional_brl_mwh(modulation_delta)}</td>
@@ -474,7 +521,7 @@ def _build_kpi_table(
         <th>Cenário</th>
         <th>Potência BESS (MW)</th>
         <th>Energia BESS (MWh)</th>
-        <th>CAPEX (R$ MM)</th>
+        <th title="CAPEX do BESS em milhões de reais dividido pela capacidade energética instalada.">CAPEX (R$ MM/MWh)</th>
         <th title="Custo de modulação referenciado à garantia física, sem BESS: PLD médio − Σ(injeção sem BESS × PLD) / energia de GF.">Modulação Original (R$/MWh)</th>
         <th title="Custo de modulação referenciado à garantia física, com BESS: PLD médio − Σ(injeção com BESS × PLD) / energia de GF.">Modulação c/ BESS (R$/MWh)</th>
         <th title="Modulação c/ BESS menos modulação original. Negativo = BESS reduz o custo de modulação.">Δ Modulação (R$/MWh)</th>
@@ -552,6 +599,11 @@ def _build_scenario_tab_content(
     curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
     curt_recovered_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
     missed_charge_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
+    capex_million_per_mwh = _capex_brl_million_per_mwh(capex_brl, bess_energy)
+    capex_per_mwh_str = (
+        f"R$ {capex_million_per_mwh:,.3f} MM/MWh"
+        if capex_million_per_mwh is not None else "n/a"
+    )
     payback_str = f"{payback:.1f} anos" if payback < 100 else "não atingível"
     lcos_str = f"R$ {lcos:,.0f}/MWh" if lcos is not None else "n/a"
     cvar_delta = (
@@ -583,7 +635,7 @@ def _build_scenario_tab_content(
             <div class="label">Energia BESS ({duration_h}h)</div>
         </div>
         <div class="kpi-item">
-            <div class="value">R$ {capex_brl / 1e6:,.1f} MM</div>
+            <div class="value">{capex_per_mwh_str}</div>
             <div class="label">CAPEX</div>
         </div>
         <div class="kpi-item">
@@ -642,6 +694,87 @@ def _build_scenario_tab_content(
     """
 
 
+def _build_must_section(must_results: list | None) -> str:
+    """Build the MUST optimization HTML section (table + TUST assumption).
+
+    Parameters
+    ----------
+    must_results : list | None
+        List of ``MustOptimizationResult`` (one per scenario). ``None`` or
+        empty renders nothing.
+
+    Returns
+    -------
+    str
+        HTML fragment, empty string when there are no results.
+    """
+    if not must_results:
+        return ""
+
+    from solar_bess_risk.report_charts import must_sensitivity_chart
+
+    first = must_results[0]
+    tust_note = (
+        " (valor default documentado)"
+        if first.tust_is_default
+        else " (informado pelo usuário)"
+    )
+
+    rows = []
+    for r in must_results:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(r.scenario_label))} ({r.duration_h}h)</td>"
+            f"<td>{r.optimal_reduction_pct * 100:.0f}%</td>"
+            f"<td>{r.optimal_must_mw:,.1f}</td>"
+            f"<td>{r.mwac - r.optimal_must_mw:,.1f}</td>"
+            f"<td>{r.optimal_net_benefit_brl_per_yr:,.0f}</td>"
+            "</tr>"
+        )
+    table_rows = "\n".join(rows)
+
+    charts = []
+    for r in must_results:
+        fig = must_sensitivity_chart(r)
+        charts.append(
+            f'<div class="chart-container">'
+            f'{fig.to_html(full_html=False, include_plotlyjs=False)}</div>'
+        )
+    charts_html = "\n".join(charts)
+
+    return f"""
+<!-- Otimização de Redução de MUST -->
+<div class="card">
+    <h2>Otimização de Redução de MUST</h2>
+    <p>
+        MUST inicial = potência do projeto ({first.mwac:,.1f} MW). A redução ótima
+        maximiza <strong>economia de TUST + variação do saldo líquido</strong>.
+        TUST aplicado: <strong>R$ {first.tust_brl_per_kw_month:.2f}/kW·mês</strong>{tust_note}.
+    </p>
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Cenário</th>
+                <th>Redução ótima</th>
+                <th>MUST ótimo (MW)</th>
+                <th>Capacidade abdicada (MW)</th>
+                <th>Benefício líquido (R$/ano)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {table_rows}
+        </tbody>
+    </table>
+    {charts_html}
+    <div class="highlight-box">
+        <strong>Premissa de modelagem:</strong> a injeção é <em>capada no MUST</em>
+        (excedente é curtailado, sem penalidade de ultrapassagem). A energia perdida
+        é valorada hora-a-hora pelo PLD via saldo líquido — sem achatamento de preço.
+    </div>
+</div>
+"""
+
+
 def build_consultancy_report(
     results_by_key: dict[str, tuple],
     output_path: str | Path,
@@ -651,8 +784,10 @@ def build_consultancy_report(
     bq_submarket: str,
     garantia_fisica_mw: float,
     fc: float,
+    params=None,
     charge_mode: int = 0,
     rte_metadata: dict[str, float | str] | None = None,
+    must_results: list | None = None,
 ) -> str:
     """Build a consultancy-style HTML report with tabs per scenario.
 
@@ -682,11 +817,19 @@ def build_consultancy_report(
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Build overview charts (cross-scenario)
-    exposure_chart = _build_exposure_comparison_chart(results_by_key)
+    modulation_chart = _build_modulation_comparison_chart(results_by_key)
     coverage_chart = _build_coverage_chart(results_by_key)
     kpi_table = _build_kpi_table(results_by_key, mwac, usd_brl_rate, garantia_fisica_mw, fc)
+    params_table = _build_simulation_params_table(
+        params=params,
+        charge_mode=charge_mode,
+        bq_submarket=bq_submarket,
+        mwac=mwac,
+        garantia_fisica_mw=garantia_fisica_mw,
+        fc=fc,
+    )
+    must_section = _build_must_section(must_results)
 
     if charge_mode == 3:
         charge_mode_desc = (
@@ -839,6 +982,23 @@ header p {{ opacity: 0.9; font-size: 1.1em; }}
     border-bottom: 1px solid #e2e8f0;
 }}
 .kpi-table tr:hover td {{ background: #f1f5f9; }}
+.params-table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin: 8px 0;
+}}
+.params-table th {{
+    width: 32%;
+    text-align: left;
+    color: var(--primary);
+    background: #f1f5f9;
+    padding: 10px 12px;
+    border-bottom: 1px solid #e2e8f0;
+}}
+.params-table td {{
+    padding: 10px 12px;
+    border-bottom: 1px solid #e2e8f0;
+}}
 .chart-container {{ margin: 24px 0; }}
 /* Tab styles */
 .tab-bar {{
@@ -918,13 +1078,21 @@ footer {{
     {rte_info}
 </div>
 
+<!-- Parâmetros da Simulação -->
+<div class="card">
+    <h2>Parâmetros da Simulação</h2>
+    {params_table}
+</div>
+
 <!-- Resumo Comparativo -->
 <div class="card">
     <h2>Resumo Comparativo — Todos os Cenários</h2>
     {kpi_table}
-    <div class="chart-container">{exposure_chart}</div>
+    <div class="chart-container">{modulation_chart}</div>
     <div class="chart-container">{coverage_chart}</div>
 </div>
+
+{must_section}
 
 <!-- Tabs por Cenário -->
 <div class="card">

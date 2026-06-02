@@ -10,9 +10,8 @@ from pathlib import Path
 import numpy as np
 
 from solar_bess_risk import __version__
-from solar_bess_risk.cli import run_session
+from solar_bess_risk.cli import DEFAULT_CSV_PATH, DEFAULT_MWAC, run_session
 from solar_bess_risk.config import (
-    ACUMULADO_YEARS,
     BACKTEST_YEARS,
     BESS_BLOCK_SPECS,
     CAPEX_USD_PER_KWH,
@@ -111,18 +110,6 @@ def _fetch_pld_for_year(year: int, params: SimulationParams) -> PriceProfile:
     return fetch_price_bigquery(year_params)
 
 
-def _compute_acumulado_pld(
-    pld_by_year: dict[int, np.ndarray],
-) -> np.ndarray:
-    """Compute mean PLD hour-by-hour across all acumulado years.
-
-    PLD 2024 must have 29/Feb removed before calling this function.
-    """
-    arrays = [pld_by_year[y] for y in sorted(pld_by_year.keys())]
-    stacked = np.stack(arrays, axis=0)
-    return stacked.mean(axis=0)
-
-
 def _build_run_manifest(
     *,
     run_id: str,
@@ -132,7 +119,6 @@ def _build_run_manifest(
     price_sources_by_year: dict[int, str],
     rte_path: str,
     rte_table: dict[int, float],
-    rte_acum: float,
     curtailment_enabled: bool,
     rte_metadata: dict[str, float | str] | None,
 ) -> RunManifest:
@@ -184,10 +170,13 @@ def _build_run_manifest(
             "bess_o_and_m_pct_capex": params.bess_o_and_m_pct_capex,
             "bess_degradation_pct_yr": params.bess_degradation_pct_yr,
             "lcoe_discount_rate": params.lcoe_discount_rate,
+            "tust_brl_per_kw_month": params.tust_brl_per_kw_month,
+            "must_sweep_max_pct": params.must_sweep_max_pct,
+            "must_sweep_step_pct": params.must_sweep_step_pct,
         },
         price_sources_by_year={str(k): v for k, v in sorted(price_sources_by_year.items())},
         backtest_years=BACKTEST_YEARS,
-        acumulado_years=ACUMULADO_YEARS,
+        acumulado_years=None,
         curtailment={
             "enabled": curtailment_enabled,
             "source": "dados/media_agregada_horaria_2025_2026.xlsx" if curtailment_enabled else None,
@@ -195,10 +184,123 @@ def _build_run_manifest(
         rte={
             "path": rte_path,
             "table": {str(k): v for k, v in sorted(rte_table.items())},
-            "acumulado_rte": rte_acum,
             "metadata": rte_metadata,
         },
     )
+
+
+def _parse_must_overrides(argv: list[str]) -> dict[str, float]:
+    """Parse MUST optimizer override flags from ``argv``.
+
+    Recognizes ``--tust``, ``--must-sweep-max`` and ``--must-sweep-step``,
+    each followed by a float value.
+
+    Parameters
+    ----------
+    argv : list[str]
+        Process argument vector (``sys.argv``).
+
+    Returns
+    -------
+    dict[str, float]
+        Mapping of ``SimulationParams`` field names to override values; empty
+        when no flags are present.
+    """
+    flag_to_field = {
+        "--tust": "tust_brl_per_kw_month",
+        "--must-sweep-max": "must_sweep_max_pct",
+        "--must-sweep-step": "must_sweep_step_pct",
+    }
+    overrides: dict[str, float] = {}
+    for flag, field in flag_to_field.items():
+        if flag in argv:
+            idx = argv.index(flag)
+            if idx + 1 >= len(argv):
+                raise ValueError(f"ERRO: flag {flag} requer um valor numérico.")
+            try:
+                overrides[field] = float(argv[idx + 1])
+            except ValueError as exc:
+                raise ValueError(
+                    f"ERRO: valor de {flag} ('{argv[idx + 1]}') não é numérico."
+                ) from exc
+    return overrides
+
+
+def _compute_must_results(
+    *,
+    solar,
+    pld_by_year: dict[int, np.ndarray],
+    price_sources_by_year: dict[int, str],
+    params: SimulationParams,
+    gf: float,
+    curtailment_enabled: bool,
+    charge_mode: int,
+    rte_table: dict[int, float],
+    rte_fallback: float,
+) -> list:
+    """Run the MUST reduction optimizer for each duration scenario.
+
+    Uses the most recent backtest year as the representative price/curtailment
+    context for the MUST decision.
+
+    Parameters
+    ----------
+    solar : SolarProfile
+        Loaded solar profile.
+    pld_by_year : dict[int, np.ndarray]
+        Hourly PLD per backtest year.
+    price_sources_by_year : dict[int, str]
+        PLD source label per year.
+    params : SimulationParams
+        Simulation parameters carrying TUST and sweep configuration.
+    gf : float
+        Garantia física in MW.
+    curtailment_enabled : bool
+        Whether ONS curtailment is applied.
+    charge_mode : int
+        Dispatch charge mode.
+    rte_table : dict[int, float]
+        Per-year round-trip efficiency.
+    rte_fallback : float
+        RTE used when a year is missing from ``rte_table``.
+
+    Returns
+    -------
+    list
+        One ``MustOptimizationResult`` per duration scenario.
+    """
+    from solar_bess_risk.must_optimizer import optimize_must_reduction
+
+    ref_year = max(pld_by_year)
+    pld = pld_by_year[ref_year]
+    rte_year = rte_table.get(ref_year, rte_fallback)
+    price_source = price_sources_by_year.get(
+        ref_year, f"pld_{params.bq_submarket}_{ref_year}"
+    )
+    price_profile = PriceProfile(pld, price_source, params.bq_submarket, ref_year)
+
+    _gen_lim = (
+        solar.generation_lim_mw
+        if solar.generation_lim_mw is not None
+        else solar.generation_mw
+    )
+    curt_series = get_curtailment_for_scenario(ref_year, curtailment_enabled, _gen_lim)
+
+    must_results = []
+    for dur in DURATIONS:
+        scenario = _get_scenario_for_duration(
+            dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+        )
+        must_results.append(
+            optimize_must_reduction(
+                solar,
+                price_profile,
+                scenario,
+                params,
+                curtailment_series=curt_series,
+            )
+        )
+    return must_results
 
 
 def main() -> None:
@@ -210,11 +312,16 @@ def main() -> None:
     if "--help" in sys.argv or "-h" in sys.argv:
         print(
             "Uso: python -m solar_bess_risk [--service-account PATH] "
-            "[--quick-test] [--skip-excel] [--director-only]"
+            "[--quick-test] [--skip-excel] [--director-only] [--must-sweep] "
+            "[--tust R$/kW.mes] [--must-sweep-max FRAC] [--must-sweep-step FRAC]"
         )
         print("\nFerramenta de backtest solar + BESS com output HTML.")
         print("  --skip-excel    Não gera backtest_completo.xlsx.")
         print("  --director-only Gera apenas relatorio_diretoria.html + manifest.")
+        print("  --must-sweep    Habilita a otimização de redução de MUST por cenário.")
+        print("  --tust          TUST do projeto em R$/kW·mês (default 7.23).")
+        print("  --must-sweep-max  Redução máxima varrida (fração, default 0.40).")
+        print("  --must-sweep-step Passo da varredura (fração, default 0.02).")
         sys.exit(0)
 
     # Parse optional flags
@@ -229,15 +336,21 @@ def main() -> None:
     director_only = "--director-only" in sys.argv
     risk_max_solar_years = 3 if quick_test else None
 
+    must_sweep_enabled = "--must-sweep" in sys.argv
+    must_overrides = _parse_must_overrides(sys.argv)
+
     # 1. Interactive parameter collection
     if quick_test:
-        params = SimulationParams(csv_path="solar/solar_baguacu_m2_600mw_id2.csv", mwac=600.0)
+        params = SimulationParams(csv_path=DEFAULT_CSV_PATH, mwac=DEFAULT_MWAC)
         curtailment_enabled = True
         rte_path = "dados/11 - Envision.xlsx"
         charge_mode = 3
         print("  Modo quick-test: risco histórico limitado a 3 anos solares.")
     else:
         params, curtailment_enabled, rte_path, charge_mode = run_session(service_account_path=sa_path)
+
+    if must_overrides:
+        params = replace(params, **must_overrides)
 
     # 2. Load solar profile
     print("\n[1/5] Carregando perfil solar...")
@@ -254,19 +367,14 @@ def main() -> None:
         rte_table = {}
         rte_fallback = params.bess_roundtrip_efficiency
 
-    rte_acum = (
-        sum(rte_table.values()) / len(rte_table) if rte_table
-        else params.bess_roundtrip_efficiency
-    )
     rte_metadata = get_rte_metadata(rte_path)
 
-    # 3. Fetch PLD for backtest years + acumulado years
+    # 3. Fetch PLD for backtest years
     print("[2/5] Carregando preços PLD...")
-    all_years = sorted(set(BACKTEST_YEARS) | set(ACUMULADO_YEARS))
     pld_by_year: dict[int, np.ndarray] = {}
     price_sources_by_year: dict[int, str] = {}
 
-    for year in all_years:
+    for year in BACKTEST_YEARS:
         print(f"  PLD {year}...")
         try:
             prices = _fetch_pld_for_year(year, params)
@@ -275,10 +383,6 @@ def main() -> None:
         except DataSourceError as e:
             print(f"\nERRO ao buscar PLD {year}: {e}", file=sys.stderr)
             sys.exit(1)
-
-    # Compute accumulated PLD (mean across 6 years)
-    print("  Calculando PLD acumulado (média 2021-2026)...")
-    acum_pld = _compute_acumulado_pld(pld_by_year)
 
     # 4. Simulate all (year × duration) combinations
     print("[3/5] Simulando cenários...")
@@ -332,52 +436,31 @@ def main() -> None:
                 scenario.peak_hours, dur, year, rte_year, scenario, projection, risk_metrics,
             )
 
-    # Accumulated scenarios
-    _gen_lim_acum = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
-    curt_acum = get_curtailment_for_scenario(2025, curtailment_enabled, _gen_lim_acum)  # proxy
-    for dur in DURATIONS:
-        scenario = _get_scenario_for_duration(dur, gf, params.usd_brl_rate, rte=rte_acum, charge_mode=charge_mode)
-        tab_name = f"Acum-{dur}h"
-        print(f"  {tab_name} (RTE={rte_acum:.4f})...")
-
-        acum_source = f"mixed_pld_{params.bq_submarket}_acum_2021_2026"
-        price_profile = PriceProfile(
-            acum_pld,
-            acum_source,
-            params.bq_submarket,
-            2001,
-        )
-        dispatch = simulate_scenario(
-            solar,
-            price_profile,
-            scenario, params, curtailment_series=curt_acum,
-        )
-        projection = project_cashflows_with_rte(
-            solar=solar,
-            pld=acum_pld,
-            price_source=acum_source,
-            bq_submarket=params.bq_submarket,
-            scenario=scenario,
-            params=params,
-            curtailment_series=curt_acum,
-            rte_table=rte_table,
-            start_year=min(rte_table) if rte_table else 2025,
-        )
-        risk_metrics = compute_historical_risk_metrics(
-            solar=solar,
-            prices=price_profile,
-            scenario=scenario,
-            params=params,
-            curtailment_series=curt_acum,
-            max_solar_years=risk_max_solar_years,
-        )
-        results_by_key[tab_name] = (
-            dispatch, acum_pld, gf, solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw,
-            scenario.peak_hours, dur, 2001, rte_acum, scenario, projection, risk_metrics,
-        )
-
     # 5. Generate reports (HTML + Excel + Consultancy report)
     print("[4/6] Gerando relatórios...")
+
+    must_results: list | None = None
+    if must_sweep_enabled:
+        print("  Otimização de redução de MUST por cenário...")
+        must_results = _compute_must_results(
+            solar=solar,
+            pld_by_year=pld_by_year,
+            price_sources_by_year=price_sources_by_year,
+            params=params,
+            gf=gf,
+            curtailment_enabled=curtailment_enabled,
+            charge_mode=charge_mode,
+            rte_table=rte_table,
+            rte_fallback=rte_fallback,
+        )
+        for r in must_results:
+            print(
+                f"    Cenário {r.scenario_label} ({r.duration_h}h): "
+                f"redução ótima {r.optimal_reduction_pct * 100:.0f}% "
+                f"(MUST {r.optimal_must_mw:,.1f} MW, "
+                f"benefício R$ {r.optimal_net_benefit_brl_per_yr:,.0f}/ano)"
+            )
+
     run_id = generate_run_id()
     project_slug = Path(params.csv_path).stem
     output_dir = Path("output") / project_slug / run_id
@@ -420,8 +503,10 @@ def main() -> None:
         bq_submarket=params.bq_submarket,
         garantia_fisica_mw=gf,
         fc=solar.fc,
+        params=params,
         charge_mode=charge_mode,
         rte_metadata=rte_metadata,
+        must_results=must_results,
     )
     print(f"  Relatório Diretoria: {consultancy_path}")
 
@@ -435,7 +520,6 @@ def main() -> None:
         price_sources_by_year=price_sources_by_year,
         rte_path=rte_path,
         rte_table=rte_table,
-        rte_acum=rte_acum,
         curtailment_enabled=curtailment_enabled,
         rte_metadata=rte_metadata,
     )

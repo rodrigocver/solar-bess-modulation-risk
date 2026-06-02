@@ -237,6 +237,14 @@ class TestFullRun:
         assert "Modulação Original (R$/MWh)" in content
         assert "Modulação c/ BESS (R$/MWh)" in content
         assert "Δ Modulação (R$/MWh)" in content
+        assert "CAPEX (R$ MM/MWh)" in content
+        assert "Modulação c/ BESS" in content
+        assert "Redução de Exposição Financeira por Cenário" not in content
+        assert "CAPEX (R$ MM)" not in content
+        assert "Parâmetros da Simulação" in content
+        assert "Modo de operacao" in content
+        assert "Vida util economica" in content
+        assert "Acum-" not in content
         assert "-7.50" in content
         assert "Exposição s/ BESS (R$ MM/ano)" not in content
         assert "Saldo Diário s/ BESS" not in content
@@ -292,7 +300,6 @@ class TestFullRun:
             price_sources_by_year={2025: "local_pld_NE_2025"},
             rte_path="dados/11 - Envision.xlsx",
             rte_table={2025: 0.8625},
-            rte_acum=0.8625,
             curtailment_enabled=False,
             rte_metadata={"typical_block_mwh": 10.1, "pcs_mva": 2.52},
         )
@@ -302,7 +309,9 @@ class TestFullRun:
         assert manifest.price_sources_by_year == {"2025": "local_pld_NE_2025"}
         assert manifest.scenarios[0]["bess_power_mw"] == 25.0
         assert manifest.scenarios[0]["bess_energy_mwh"] == 50.0
+        assert manifest.acumulado_years is None
         assert manifest.rte["metadata"]["pcs_mva"] == 2.52
+        assert "acumulado_rte" not in manifest.rte
 
     def test_produces_manifest_json(self, params, mock_bq_prices, tmp_path):
         """Full pipeline produces manifest.json."""
@@ -451,6 +460,12 @@ class TestFullRun:
         cycle_life_reached_col = headers.index("vida_util_por_ciclo_atingida") + 1
         injection_sem_col = headers.index("injecao_sem_bess_mwh") + 1
         injection_com_col = headers.index("injecao_com_bess_mwh") + 1
+        gen_lim_col = headers.index("geracao_solar_limitada_mw") + 1
+        gf_energy_col = headers.index("energia_gf_hora_mwh") + 1
+        flat_gf_col = headers.index("valor_flat_gf_hora_r") + 1
+        captured_sem_col = headers.index("valor_capturado_sem_bess_hora_r") + 1
+        mod_sem_col = headers.index("modulacao_horaria_sem_bess_r") + 1
+        mod_sem_mwh_col = headers.index("modulacao_sem_bess_r_mwh_gf") + 1
 
         assert ws.cell(first_data_row, capex_col).value == round(scenario.capex_brl)
         assert ws.cell(first_data_row, power_col).value == round(scenario.bess_power_mw)
@@ -477,6 +492,12 @@ class TestFullRun:
         assert ws.cell(8762, cycle_life_reached_col).value is True
         assert ws.cell(first_data_row, injection_sem_col).value == 0
         assert ws.cell(first_data_row, injection_com_col).value == 0
+        assert ws.cell(first_data_row, gen_lim_col).value == 0
+        assert ws.cell(first_data_row, gf_energy_col).value == 10
+        assert ws.cell(first_data_row, flat_gf_col).value == 1000
+        assert ws.cell(first_data_row, captured_sem_col).value == 0
+        assert ws.cell(first_data_row, mod_sem_col).value == 1000
+        assert ws.cell(first_data_row, mod_sem_mwh_col).value == 100
 
         diag = wb["diagnostico_carga"]
         diag_headers = [cell.value for cell in diag[1]]
@@ -486,3 +507,113 @@ class TestFullRun:
         assert "gargalo_potencia_carga_mwh" in diag_headers
         assert "gargalo_janela_descarga_mwh" in diag_headers
         assert "potencial_extensao_d1_total_mwh" in diag_headers
+
+
+class TestMustSweepOptInRun:
+    """Opt-in MUST optimizer integration (T023)."""
+
+    def test_optimizer_runs_per_scenario_without_breaking_pipeline(
+        self, params, mock_bq_prices
+    ):
+        """--must-sweep path: one MustOptimizationResult per scenario, report OK."""
+        from solar_bess_risk.profile import load_solar_csv
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.must_optimizer import (
+            MustOptimizationResult,
+            optimize_must_reduction,
+        )
+
+        solar = load_solar_csv(params.csv_path, params.mwac)
+        prices = PriceProfile(
+            prices_brl_per_mwh=mock_bq_prices,
+            source="test_mock",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        scenarios = _build_scenarios(solar.garantia_fisica_mw, params)
+        # Use the price-aware engine the optimizer relies on.
+        scenarios = [
+            ScenarioDefinition(
+                label=s.label,
+                peak_hours=s.peak_hours,
+                duration_h=s.duration_h,
+                bess_power_mw=s.bess_power_mw,
+                bess_energy_mwh=s.bess_energy_mwh,
+                capex_brl=s.capex_brl,
+                charge_power_mw=s.charge_power_mw,
+                charge_mode=3,
+            )
+            for s in scenarios
+        ]
+
+        must_results = [
+            optimize_must_reduction(solar, prices, s, params) for s in scenarios
+        ]
+
+        assert len(must_results) == len(scenarios)
+        for r in must_results:
+            assert isinstance(r, MustOptimizationResult)
+            # Baseline present, optimum is the sweep argmax
+            assert any(p.reduction_pct == 0.0 for p in r.sweep)
+            best = max(r.sweep, key=lambda p: p.net_benefit_brl_per_yr)
+            assert r.optimal_net_benefit_brl_per_yr == pytest.approx(
+                best.net_benefit_brl_per_yr
+            )
+            assert 0.0 <= r.optimal_reduction_pct <= params.must_sweep_max_pct
+
+    def test_consultancy_report_renders_must_section(
+        self, params, mock_bq_prices, tmp_path
+    ):
+        """Report includes the MUST section when must_results is provided."""
+        from solar_bess_risk.profile import load_solar_csv
+        from solar_bess_risk.data_sources import PriceProfile
+        from solar_bess_risk.must_optimizer import optimize_must_reduction
+        from solar_bess_risk.report_consultancy import build_consultancy_report
+        from solar_bess_risk.simulation import simulate_scenario
+        from solar_bess_risk.economics import compute_scenario_economics
+
+        solar = load_solar_csv(params.csv_path, params.mwac)
+        prices = PriceProfile(
+            prices_brl_per_mwh=mock_bq_prices,
+            source="test_mock",
+            bq_submarket="SE",
+            bq_year=2025,
+        )
+        scenario = ScenarioDefinition(
+            label="A",
+            peak_hours=frozenset({19}),
+            duration_h=4,
+            bess_power_mw=solar.garantia_fisica_mw,
+            bess_energy_mwh=solar.garantia_fisica_mw * 4,
+            capex_brl=1.0,
+            charge_power_mw=solar.garantia_fisica_mw,
+            charge_mode=3,
+        )
+        dispatch = simulate_scenario(solar, prices, scenario, params)
+        econ = compute_scenario_economics(solar, prices, scenario, dispatch, params)
+        results_by_key = {
+            "2025-4h": (
+                dispatch, prices.prices_brl_per_mwh, solar.garantia_fisica_mw,
+                solar.generation_lim_mw if solar.generation_lim_mw is not None
+                else solar.generation_mw,
+                scenario.peak_hours, 4, 2025, 1.0, scenario, None, None,
+            )
+        }
+        must_results = [optimize_must_reduction(solar, prices, scenario, params)]
+
+        out = tmp_path / "rel.html"
+        path = build_consultancy_report(
+            results_by_key,
+            out,
+            mwac=params.mwac,
+            usd_brl_rate=params.usd_brl_rate,
+            bq_submarket="SE",
+            garantia_fisica_mw=solar.garantia_fisica_mw,
+            fc=solar.fc,
+            params=params,
+            charge_mode=3,
+            must_results=must_results,
+        )
+        content = Path(path).read_text()
+        assert "Otimização de Redução de MUST" in content
+        assert "MUST ótimo" in content
