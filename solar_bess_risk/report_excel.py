@@ -735,7 +735,6 @@ def build_html_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     summary_rows: list[dict] = []
-    detail_sections: list[str] = []
     float_formatter = lambda x: f"{x:,.4f}"
 
     for tab_name, data in results_by_key.items():
@@ -754,13 +753,7 @@ def build_html_report(
         summary["capex_usd_kwh"] = CAPEX_USD_PER_KWH[duration_h]
         summary_rows.append(summary)
 
-        full_df = pd.concat([df, pd.DataFrame([summary])], ignore_index=True)
-        detail_sections.append(
-            "<details>"
-            f"<summary>{escape(tab_name)} - serie horaria completa</summary>"
-            f"{full_df.to_html(index=False, classes='hourly', float_format=float_formatter)}"
-            "</details>"
-        )
+
 
     summary_df = pd.DataFrame(summary_rows)
     preferred = [
@@ -818,7 +811,6 @@ th {{ background: #24466f; color: white; position: sticky; top: 0; }}
 td:first-child, th:first-child {{ text-align: left; }}
 details {{ margin: 18px 0; }}
 summary {{ cursor: pointer; font-weight: 700; padding: 8px 0; }}
-.hourly {{ font-size: 11px; }}
 .note {{ max-width: 960px; line-height: 1.45; }}
 </style>
 </head>
@@ -840,10 +832,7 @@ summary {{ cursor: pointer; font-weight: 700; padding: 8px 0; }}
 <h2>Resumo</h2>
 {summary_df.to_html(index=False, classes='summary', float_format=float_formatter)}
 </section>
-<section>
-<h2>Séries Horárias</h2>
-{''.join(detail_sections)}
-</section>
+<!-- series horarias removidas — disponíveis no Excel -->
 </body>
 </html>"""
 
