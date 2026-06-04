@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from solar_bess_risk.config import HOURS_PER_YEAR
-from solar_bess_risk.config import BESS_BLOCK_SPECS, CAPEX_USD_PER_KWH, SCENARIO_TEMPLATES, SimulationParams
+from solar_bess_risk.config import CAPEX_USD_PER_KWH, SCENARIO_TEMPLATES, SimulationParams, size_bess_blocks
 from solar_bess_risk.data_sources import (
     BQ_PRIMARY_TABLE,
     DataSourceError,
@@ -56,14 +56,15 @@ class PriceFetchResult:
 
 def build_scenarios(garantia_fisica_mw: float, params: SimulationParams) -> list[ScenarioDefinition]:
     """Build BESS scenarios using block-based sizing from the solar-derived guarantee."""
-    import math
-
     scenarios = []
     for template in SCENARIO_TEMPLATES:
-        block = BESS_BLOCK_SPECS[template.duration_h]
-        n_blocks = math.ceil(garantia_fisica_mw / block.block_power_mw)
-        bess_power = n_blocks * block.block_power_mw
-        bess_energy = n_blocks * block.block_energy_mwh
+        sizing = size_bess_blocks(
+            garantia_fisica_mw,
+            template.duration_h,
+            params.gf_daily_coverage_target_pct,
+        )
+        bess_power = sizing.bess_power_mw
+        bess_energy = sizing.bess_energy_mwh
         capex_brl = bess_energy * 1000 * CAPEX_USD_PER_KWH[template.duration_h] * params.usd_brl_rate
 
         scenarios.append(ScenarioDefinition(

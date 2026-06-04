@@ -6,6 +6,7 @@ No magic numbers anywhere else in the codebase.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -119,6 +120,64 @@ BESS_BLOCK_SPECS: dict[int, BessBlockSpec] = {
     4: BessBlockSpec(duration_h=4, block_power_mw=2.52, block_energy_mwh=10.1),
 }
 
+# Default GF daily coverage target. None -> size by power (legacy behaviour:
+# n_blocks = ceil(gf / block_power_mw)). A fraction (0-2) -> size by energy so the
+# BESS stores that share of one day of garantia fisica (gf x 24 MWh).
+DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT: float | None = None
+
+
+class BessSizing(NamedTuple):
+    """Resolved BESS sizing for a duration scenario."""
+
+    n_blocks: int
+    bess_power_mw: float
+    bess_energy_mwh: float
+
+
+def size_bess_blocks(
+    garantia_fisica_mw: float,
+    duration_h: int,
+    coverage_target_pct: float | None = None,
+) -> BessSizing:
+    """Size the BESS in whole blocks for a given duration.
+
+    Two sizing modes:
+
+    - ``coverage_target_pct is None`` (legacy): size by power so the BESS can
+      sustain the garantia fisica, ``n_blocks = ceil(gf / block_power_mw)``.
+    - ``coverage_target_pct`` given: size by energy so the BESS stores that share
+      of one day of garantia fisica, ``n_blocks = ceil(coverage * gf * 24 /
+      block_energy_mwh)``. Block count is rounded up, so the realised coverage is
+      always >= the requested target.
+
+    Parameters
+    ----------
+    garantia_fisica_mw : float
+        Physical guarantee in MW.
+    duration_h : int
+        BESS duration in hours; selects the block spec.
+    coverage_target_pct : float | None
+        Target daily GF coverage as a fraction (e.g. 0.5 = 50%). ``None`` selects
+        the legacy power-based sizing.
+
+    Returns
+    -------
+    BessSizing
+        Whole-block count plus resulting power (MW) and energy (MWh).
+    """
+    block = BESS_BLOCK_SPECS[duration_h]
+    if coverage_target_pct is None:
+        n_blocks = math.ceil(garantia_fisica_mw / block.block_power_mw)
+    else:
+        energy_target_mwh = coverage_target_pct * garantia_fisica_mw * 24.0
+        n_blocks = math.ceil(energy_target_mwh / block.block_energy_mwh)
+    n_blocks = max(1, n_blocks)
+    return BessSizing(
+        n_blocks=n_blocks,
+        bess_power_mw=n_blocks * block.block_power_mw,
+        bess_energy_mwh=n_blocks * block.block_energy_mwh,
+    )
+
 # ---------------------------------------------------------------------------
 # Curtailment
 # ---------------------------------------------------------------------------
@@ -156,6 +215,7 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "must_sweep_step_pct": (1e-6, 1.0),
     "pld_factor_2026": (0.0, 100.0),
     "curtailment_factor_2026": (0.0, 100.0),
+    "gf_daily_coverage_target_pct": (0.0, 2.0),
 }
 
 VALID_BQ_SUBMARKETS: set[str] = {"SE", "S", "NE", "N"}
@@ -230,6 +290,7 @@ class SimulationParams:
     pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
     curtailment_factor_2026: float = DEFAULT_CURTAILMENT_FACTOR_2026
     curtailment_assumption_pct_2026: float = CURTAILMENT_ASSUMPTION_PCT_2026
+    gf_daily_coverage_target_pct: float | None = DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
 
     def __post_init__(self) -> None:
         """Validate MUST/TUST optimizer fields against documented bounds.
@@ -246,6 +307,11 @@ class SimulationParams:
             ("must_sweep_step_pct", self.must_sweep_step_pct),
             ("curtailment_factor_2026", self.curtailment_factor_2026),
             *((("pld_factor_2026", self.pld_factor_2026),) if self.pld_factor_2026 is not None else ()),
+            *(
+                (("gf_daily_coverage_target_pct", self.gf_daily_coverage_target_pct),)
+                if self.gf_daily_coverage_target_pct is not None
+                else ()
+            ),
         ):
             lo, hi = PARAM_BOUNDS[field_name]
             if not (lo <= value <= hi):

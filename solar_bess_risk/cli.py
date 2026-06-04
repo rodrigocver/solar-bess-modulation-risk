@@ -14,6 +14,7 @@ from solar_bess_risk.config import (
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BESS_O_AND_M_PCT_CAPEX,
     DEFAULT_CURTAILMENT_FACTOR_2026,
+    DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT,
     DEFAULT_LCOE_DISCOUNT_RATE,
     DEFAULT_PLD_FACTOR_2026,
     DEFAULT_RTE_PATH,
@@ -163,6 +164,35 @@ def _prompt_charge_mode() -> int:
         print("  ERRO: opção inválida. Digite 0 ou 3.")
 
 
+def _prompt_coverage_target() -> float | None:
+    """Prompt for the desired GF daily coverage target.
+
+    Returns
+    -------
+    float | None
+        Target coverage as a fraction (e.g. 0.5 for 50%), or ``None`` to keep the
+        legacy power-based BESS sizing. Accepts a percentage value (0-200).
+    """
+    lo, hi = PARAM_BOUNDS["gf_daily_coverage_target_pct"]
+    while True:
+        raw = input(
+            "  Cobertura diaria da GF desejada [%] "
+            "(Enter = dimensionar por potencia): "
+        ).strip()
+        if raw == "":
+            return DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
+        try:
+            pct = float(raw.replace(",", "."))
+        except ValueError:
+            print(f"  ERRO: valor '{raw}' nao e numerico.")
+            continue
+        frac = pct / 100.0
+        if not (lo <= frac <= hi):
+            print(f"  ERRO: {pct}% fora de [{lo*100:.0f}%, {hi*100:.0f}%].")
+            continue
+        return frac
+
+
 def _prompt_rte_path(default: str = DEFAULT_RTE_PATH) -> str:
     """Prompt for RTE Excel file path (confirmation of default)."""
     raw = input(f"  Caminho do arquivo RTE (padrão: {default}): ").strip()
@@ -259,6 +289,11 @@ def run_session(service_account_path: str | None = None) -> tuple:
         curt_hi,
     )
 
+    # 5. Dimensionamento do BESS por cobertura diária da GF (opcional)
+    print()
+    print("  ── Dimensionamento do BESS ──")
+    gf_daily_coverage_target_pct = _prompt_coverage_target()
+
     # Load RTE table for summary display (best-effort)
     rte_preview: dict[int, float] = {}
     try:
@@ -295,6 +330,10 @@ def run_session(service_account_path: str | None = None) -> tuple:
     else:
         print("  Fator PLD 2026:   auto (BigQuery)")
     print(f"  Fator Curt. 2026: {curtailment_factor_2026:.4f}")
+    if gf_daily_coverage_target_pct is not None:
+        print(f"  Cobertura GF/dia: {gf_daily_coverage_target_pct:.1%} (dimensiona por energia)")
+    else:
+        print("  Cobertura GF/dia: dimensionamento por potência (padrão)")
     print(f"  Premissa curt. 2026: {CURTAILMENT_ASSUMPTION_PCT_2026:.1f} (fator planilha previsao_futura)")
 
     params = SimulationParams(
@@ -308,5 +347,6 @@ def run_session(service_account_path: str | None = None) -> tuple:
         bq_service_account_path=service_account_path,
         pld_factor_2026=pld_factor_2026,
         curtailment_factor_2026=curtailment_factor_2026,
+        gf_daily_coverage_target_pct=gf_daily_coverage_target_pct,
     )
     return params, curtailment_enabled, rte_path, charge_mode

@@ -13,12 +13,12 @@ from solar_bess_risk import __version__
 from solar_bess_risk.cli import DEFAULT_CSV_PATH, DEFAULT_MWAC, run_session
 from solar_bess_risk.config import (
     BACKTEST_YEARS,
-    BESS_BLOCK_SPECS,
     CAPEX_USD_PER_KWH,
     DURATIONS,
     HOURS_PER_YEAR,
     SCENARIO_TEMPLATES,
     SimulationParams,
+    size_bess_blocks,
 )
 from solar_bess_risk.curtailment import get_curtailment_for_scenario
 from solar_bess_risk.data_sources import (
@@ -37,7 +37,12 @@ from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
 
 def _get_scenario_for_duration(
-    duration_h: int, gf: float, usd_brl_rate: float, rte: float = 1.0, charge_mode: int = 0
+    duration_h: int,
+    gf: float,
+    usd_brl_rate: float,
+    rte: float = 1.0,
+    charge_mode: int = 0,
+    coverage_target_pct: float | None = None,
 ) -> ScenarioDefinition:
     """Build a ScenarioDefinition for a given duration using block-based sizing.
 
@@ -47,14 +52,11 @@ def _get_scenario_for_duration(
 
     Number of blocks = ceil(garantia_fisica / block_power).
     """
-    import math
-
     template = next(t for t in SCENARIO_TEMPLATES if t.duration_h == duration_h)
-    block = BESS_BLOCK_SPECS[duration_h]
 
-    n_blocks = math.ceil(gf / block.block_power_mw)
-    bess_power = n_blocks * block.block_power_mw
-    bess_energy = n_blocks * block.block_energy_mwh
+    sizing = size_bess_blocks(gf, duration_h, coverage_target_pct)
+    bess_power = sizing.bess_power_mw
+    bess_energy = sizing.bess_energy_mwh
 
     capex_usd = bess_energy * 1000 * CAPEX_USD_PER_KWH[duration_h]
     capex_brl = capex_usd * usd_brl_rate
@@ -328,7 +330,8 @@ def _compute_must_reduction_scenarios(
         )
 
         scenario = _get_scenario_for_duration(
-            dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+            dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode,
+            coverage_target_pct=params.gf_daily_coverage_target_pct,
         )
 
         opt = optimize_must_reduction(
@@ -481,7 +484,8 @@ def _compute_must_results(
 
         for dur in DURATIONS:
             scenario = _get_scenario_for_duration(
-                dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+                dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode,
+                coverage_target_pct=params.gf_daily_coverage_target_pct,
             )
             opt = optimize_must_reduction(
                 solar,
@@ -601,7 +605,7 @@ def main() -> None:
         rte_year = rte_table.get(year, rte_fallback)
 
         for dur in DURATIONS:
-            scenario = _get_scenario_for_duration(dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode)
+            scenario = _get_scenario_for_duration(dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode, coverage_target_pct=params.gf_daily_coverage_target_pct)
             tab_name = f"{year}-{dur}h"
             print(f"  {tab_name} (RTE={rte_year:.4f})...")
 
