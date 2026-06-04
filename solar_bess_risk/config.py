@@ -60,8 +60,7 @@ DEFAULT_USD_BRL_RATE: float = 5.0
 DEFAULT_USEFUL_LIFE_YR: int = 20
 DEFAULT_BESS_ROUNDTRIP_EFFICIENCY: float = 0.85
 DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.015
-DEFAULT_BESS_DEGRADATION_PCT_YR: float = 0.02
-DEFAULT_LCOE_DISCOUNT_RATE: float = 0.05
+DEFAULT_LCOE_DISCOUNT_RATE: float = 0.1
 
 # ---------------------------------------------------------------------------
 # MUST reduction optimizer (feature 003)
@@ -76,6 +75,22 @@ KW_PER_MW: int = 1000                   # kW/MW (TUST annualisation)
 # MUST reduction grid sweep (fraction of project power abdicated)
 MUST_SWEEP_MAX_PCT: float = 0.40        # fraction (0-1)
 MUST_SWEEP_STEP_PCT: float = 0.02       # fraction (0-1)
+
+# ---------------------------------------------------------------------------
+# 2026 data-fill factors
+# ---------------------------------------------------------------------------
+
+# Scalar multiplier applied to the 2025 PLD base when filling unobserved 2026
+# hours.  None → auto-calculated from the ratio of observed 2026 vs 2025 PLD.
+DEFAULT_PLD_FACTOR_2026: float | None = None
+
+# Scalar multiplier applied to the curtailment profile loaded for 2026.
+# 1.0 = use the profile as-is; e.g. 0.8 = 20% lower curtailment in 2026.
+DEFAULT_CURTAILMENT_FACTOR_2026: float = 1.0
+
+# Curtailment factor assumption embedded in the previsao_futura sheet of
+# media_agregada_horaria_2025_2026.xlsx — informational/metadata only.
+CURTAILMENT_ASSUMPTION_PCT_2026: float = 9.2
 
 # ---------------------------------------------------------------------------
 # CAPEX fixo por duração (spec v2.0 — não é mais parâmetro do usuário)
@@ -134,12 +149,13 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "useful_life_years": (1, 100),
     "bess_roundtrip_efficiency": (0.01, 1.0),
     "bess_o_and_m_pct_capex": (0.0, 1.0),
-    "bess_degradation_pct_yr": (0.0, 1.0),
     "lcoe_discount_rate": (0.0, 1.0),
     "tust_brl_per_kw_month": (0.0, 1000.0),
     "must_reduction_pct": (0.0, 1.0),
     "must_sweep_max_pct": (0.0, 1.0),
     "must_sweep_step_pct": (1e-6, 1.0),
+    "pld_factor_2026": (0.0, 100.0),
+    "curtailment_factor_2026": (0.0, 100.0),
 }
 
 VALID_BQ_SUBMARKETS: set[str] = {"SE", "S", "NE", "N"}
@@ -185,6 +201,16 @@ class SimulationParams:
         Maximum MUST reduction fraction (0-1) explored by the optimizer sweep.
     must_sweep_step_pct : float
         Step of the MUST reduction sweep grid as a fraction (0-1).
+    pld_factor_2026 : float | None
+        Scalar multiplier applied to the 2025 PLD base when filling unobserved
+        2026 hours.  None → factor is auto-calculated from BigQuery observed data.
+    curtailment_factor_2026 : float
+        Scalar multiplier applied to the 2026 curtailment profile (e.g. 0.8 =
+        20% less curtailment than the base previsao_futura sheet).  Default 1.0.
+    curtailment_assumption_pct_2026 : float
+        Curtailment factor assumption used when building the previsao_futura
+        sheet (aba da media_agregada_horaria_2025_2026.xlsx). Purely informational
+        — displayed in the report but does not alter the simulation computation.
     """
 
     csv_path: str
@@ -196,12 +222,14 @@ class SimulationParams:
     useful_life_years: int = DEFAULT_USEFUL_LIFE_YR
     bess_roundtrip_efficiency: float = DEFAULT_BESS_ROUNDTRIP_EFFICIENCY
     bess_o_and_m_pct_capex: float = DEFAULT_BESS_O_AND_M_PCT_CAPEX
-    bess_degradation_pct_yr: float = DEFAULT_BESS_DEGRADATION_PCT_YR
     lcoe_discount_rate: float = DEFAULT_LCOE_DISCOUNT_RATE
     bq_service_account_path: str | None = None
     tust_brl_per_kw_month: float = DEFAULT_TUST_BRL_PER_KW_MONTH
     must_sweep_max_pct: float = MUST_SWEEP_MAX_PCT
     must_sweep_step_pct: float = MUST_SWEEP_STEP_PCT
+    pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
+    curtailment_factor_2026: float = DEFAULT_CURTAILMENT_FACTOR_2026
+    curtailment_assumption_pct_2026: float = CURTAILMENT_ASSUMPTION_PCT_2026
 
     def __post_init__(self) -> None:
         """Validate MUST/TUST optimizer fields against documented bounds.
@@ -216,6 +244,8 @@ class SimulationParams:
             ("tust_brl_per_kw_month", self.tust_brl_per_kw_month),
             ("must_sweep_max_pct", self.must_sweep_max_pct),
             ("must_sweep_step_pct", self.must_sweep_step_pct),
+            ("curtailment_factor_2026", self.curtailment_factor_2026),
+            *((("pld_factor_2026", self.pld_factor_2026),) if self.pld_factor_2026 is not None else ()),
         ):
             lo, hi = PARAM_BOUNDS[field_name]
             if not (lo <= value <= hi):

@@ -24,6 +24,34 @@ from solar_bess_risk.config import CAPEX_USD_PER_KWH, HOURS_PER_YEAR
 from solar_bess_risk.simulation import DispatchResult
 
 
+def _split_curtailment(dispatch: DispatchResult) -> tuple[np.ndarray, np.ndarray]:
+    """Split available curtailment into technical and MUST-policy components.
+
+    The dispatch lumps three sources into a single ``curtailment_mwh`` array:
+    external ONS curtailment, inverter clipping released by the BESS (both
+    *technical*), and the energy above the MUST injection cap. When the MUST is
+    deliberately reduced to capture TUST savings, the latter portion is a
+    *policy* cut, not a technical loss, so consultancy KPIs must report it
+    separately to avoid overstating technical curtailment.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(technical_mwh, must_policy_mwh)`` per hour. They sum to the total
+        available curtailment (``dispatch.curtailment_mwh``).
+    """
+    total = dispatch.curtailment_mwh
+    ons = dispatch.ons_curtailment_mwh
+    clip = dispatch.clipping_available_mwh
+    if ons is None:
+        ons = total
+    if clip is None:
+        clip = np.zeros_like(total)
+    technical = np.minimum(total, ons + clip)
+    must_policy = np.maximum(0.0, total - technical)
+    return technical, must_policy
+
+
 def _scenario_from_data(data: tuple):
     """Return the ScenarioDefinition appended by the main pipeline, when present."""
     if len(data) > 8 and hasattr(data[8], "bess_energy_mwh"):
@@ -116,6 +144,7 @@ def _build_simulation_params_table(
     mwac: float,
     garantia_fisica_mw: float,
     fc: float,
+    effective_pld_factor_2026: float | None = None,
 ) -> str:
     """Build the simulation parameter table shown in the executive report."""
     if charge_mode == 3:
@@ -133,10 +162,18 @@ def _build_simulation_params_table(
         ("Modo de operacao", charge_mode_label),
         ("Vida util economica", f"{getattr(params, 'useful_life_years', 'n/a')} anos"),
         ("O&M anual BESS", f"{getattr(params, 'bess_o_and_m_pct_capex', 0.0) * 100:,.2f}% do CAPEX"),
-        ("Degradacao anual BESS", f"{getattr(params, 'bess_degradation_pct_yr', 0.0) * 100:,.2f}%"),
-        ("Taxa de desconto LCOS", f"{getattr(params, 'lcoe_discount_rate', 0.0) * 100:,.2f}%"),
+        ("Payback", "simples (fluxo nominal, sem desconto)"),
+        ("LCOS", f"descontado a {getattr(params, 'lcoe_discount_rate', 0.0) * 100:,.2f}% a.a."),
         ("RTE fallback", f"{getattr(params, 'bess_roundtrip_efficiency', 0.0) * 100:,.2f}%"),
     ]
+    pld_factor = getattr(params, "pld_factor_2026", None)
+    displayed_pld_factor = pld_factor if pld_factor is not None else effective_pld_factor_2026
+    rows.append(
+        ("Fator PLD 2026", f"{displayed_pld_factor:.4f}" if displayed_pld_factor is not None else "auto (BigQuery)")
+    )
+    rows.append(
+        ("Premissa curtailment 2026", f"{getattr(params, 'curtailment_assumption_pct_2026', 9.2):.1f}*Realizado 2025")
+    )
     rows_html = "".join(
         f"<tr><th>{escape(label)}</th><td>{escape(str(value))}</td></tr>"
         for label, value in rows
@@ -525,6 +562,16 @@ def _build_kpi_table(
         exp_com = float((dispatch.residual_deficit_mwh * pld).sum())
         delta_exp = exp_sem - exp_com
         delta_exp_pct = delta_exp / exp_sem * 100.0 if abs(exp_sem) > 1e-10 else 0.0
+        # Trade-off de redução de MUST (item 4.1), exibido propositadamente em
+        # duas colunas separadas:
+        #   - "economia" = Δ saldo de energia (net_com − net_sem), SEM TUST.
+        #     Para as linhas de redução de MUST esta parcela tende a ser menor
+        #     (ou negativa), pois cortar o topo do perfil reduz a receita de
+        #     energia injetada.
+        #   - "tust_savings" (coluna à parte) = economia recorrente de TUST.
+        # A separação deixa claro que a redução de MUST "atrapalha" a economia de
+        # energia, mas é compensada pela economia de TUST. O payback simples
+        # (projeção nominal) soma ambas as parcelas; ver projection.project_cashflows_with_rte.
         economia = net_com - net_sem
         delta_saldo_pct = economia / abs(net_sem) * 100.0 if abs(net_sem) > 1e-10 else 0.0
         payback = (
@@ -538,11 +585,15 @@ def _build_kpi_table(
         deficit_com = dispatch.residual_deficit_mwh.sum()
         coverage = (1 - deficit_com / deficit_sem) * 100 if deficit_sem > 0 else 0
 
-        curt_total = float(dispatch.curtailment_mwh.sum())
+        curt_technical, curt_must_policy = _split_curtailment(dispatch)
+        curt_total = float(np.sum(curt_technical))
+        must_cut_total = float(np.sum(curt_must_policy))
+        total_available = curt_total + must_cut_total
         gen_total = float(np.sum(gen))
-        curt_recovered = curt_total - float(dispatch.curtailment_lost_mwh.sum())
+        curt_recovered = total_available - float(dispatch.curtailment_lost_mwh.sum())
         curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
-        curt_recovered_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
+        must_cut_pct = (must_cut_total / gen_total * 100) if gen_total > 0 else 0
+        curt_recovered_pct = (curt_recovered / total_available * 100) if total_available > 0 else 0
 
         missed_charge = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
 
@@ -552,6 +603,10 @@ def _build_kpi_table(
         cvar_com = risk_metrics["cvar_95_com_bess_brl"] if risk_metrics else None
         cvar_delta = (cvar_com - cvar_sem) if cvar_sem is not None and cvar_com is not None else None
         cvar_delta_str = f"{cvar_delta / 1e3:,.1f}" if cvar_delta is not None else "n/a"
+
+        # TUST savings from MUST reduction (index 11, only present for MUST-reduction rows)
+        tust_savings_brl = data[11] if len(data) > 11 and data[11] is not None else None
+        tust_savings_str = f"{tust_savings_brl / 1e6:,.2f}" if tust_savings_brl is not None else "—"
 
         rows_html += f"""<tr>
             <td>{escape(tab_name)}</td>
@@ -564,9 +619,11 @@ def _build_kpi_table(
             <td>{delta_exp / 1e6:,.2f}</td>
             <td>{delta_exp_pct:,.1f}%</td>
             <td>{economia / 1e6:,.2f}</td>
+            <td>{tust_savings_str}</td>
             <td>{delta_saldo_pct:,.1f}%</td>
             <td>{coverage:.1f}%</td>
             <td>{curtailment_pct:.1f}%</td>
+            <td>{must_cut_pct:.1f}%</td>
             <td>{curt_recovered_pct:.1f}%</td>
             <td>{cvar_delta_str}</td>
             <td>{missed_charge:,.0f}</td>
@@ -586,14 +643,16 @@ def _build_kpi_table(
         <th title="Exposição sem BESS menos exposição com BESS. Positivo = redução de exposição.">Δ Exposição (R$ MM/ano)</th>
         <th title="Δ Exposição dividido pela exposição sem BESS.">Δ Exposição (%)</th>
         <th title="Saldo líquido com BESS menos saldo líquido sem BESS. Positivo = ganho financeiro líquido do BESS.">Δ Saldo Líquido (R$ MM/ano)</th>
+        <th title="Economia anual de TUST pela redução de MUST contratada. Presente apenas no cenário de otimização de MUST.">Economia MUST Anual (R$ MM/ano)</th>
         <th title="Δ Saldo Líquido dividido pelo módulo do saldo líquido sem BESS.">Δ Saldo Líquido (%)</th>
         <th>Cobertura GF</th>
-        <th>Curtailment / Geração</th>
+        <th title="Curtailment técnico (ONS + clipping de inversor liberado pelo BESS) sobre a geração. Não inclui o corte por redução de MUST.">Curtailment / Geração</th>
+        <th title="Energia cortada para respeitar o MUST contratado (reduzido). É uma decisão de política comercial para capturar economia de TUST, não uma perda técnica.">Corte MUST / Geração</th>
         <th>Curtailment Recuperado</th>
         <th>Δ CVaR 95% (R$ mil/dia)</th>
         <th>Carga Não Realizada (MWh/ano)</th>
-        <th>Payback (anos)</th>
-        <th>LCOS (R$/MWh)</th>
+        <th title="Payback simples: fluxo nominal acumulado, sem desconto.">Payback simples (anos)</th>
+        <th title="LCOS calculado com taxa de desconto informada nas premissas.">LCOS descontado (R$/MWh)</th>
     </tr></thead>
     <tbody>{rows_html}</tbody>
     </table>"""
@@ -651,11 +710,15 @@ def _build_scenario_tab_content(
     deficit_sem = dispatch.deficit_mwh.sum()
     deficit_com = dispatch.residual_deficit_mwh.sum()
     coverage = (1 - deficit_com / deficit_sem) * 100 if deficit_sem > 0 else 0
-    curt_total = float(dispatch.curtailment_mwh.sum())
+    curt_technical, curt_must_policy = _split_curtailment(dispatch)
+    curt_total = float(np.sum(curt_technical))
+    must_cut_total = float(np.sum(curt_must_policy))
+    total_available = curt_total + must_cut_total
     gen_total = float(np.sum(gen))
-    curt_recovered = curt_total - float(dispatch.curtailment_lost_mwh.sum())
+    curt_recovered = total_available - float(dispatch.curtailment_lost_mwh.sum())
     curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
-    curt_recovered_pct = (curt_recovered / curt_total * 100) if curt_total > 0 else 0
+    must_cut_pct = (must_cut_total / gen_total * 100) if gen_total > 0 else 0
+    curt_recovered_pct = (curt_recovered / total_available * 100) if total_available > 0 else 0
     missed_charge_total = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
     capex_million_per_mwh = _capex_brl_million_per_mwh(capex_brl, bess_energy)
     capex_per_mwh_str = (
@@ -715,6 +778,10 @@ def _build_scenario_tab_content(
         <div class="kpi-item">
             <div class="value">{curtailment_pct:.1f}%</div>
             <div class="label">Curtailment / Geração</div>
+        </div>
+        <div class="kpi-item">
+            <div class="value">{must_cut_pct:.1f}%</div>
+            <div class="label">Corte MUST / Geração</div>
         </div>
         <div class="kpi-item">
             <div class="value">{curt_recovered_pct:.1f}%</div>
@@ -847,6 +914,7 @@ def build_consultancy_report(
     rte_metadata: dict[str, float | str] | None = None,
     must_results: list | None = None,
     must_reduction_by_key: dict[str, tuple] | None = None,
+    effective_pld_factor_2026: float | None = None,
 ) -> str:
     """Build a consultancy-style HTML report with tabs per scenario.
 
@@ -894,6 +962,7 @@ def build_consultancy_report(
         mwac=mwac,
         garantia_fisica_mw=garantia_fisica_mw,
         fc=fc,
+        effective_pld_factor_2026=effective_pld_factor_2026,
     )
     must_section = _build_must_section(must_results)
 

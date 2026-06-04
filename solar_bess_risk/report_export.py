@@ -84,7 +84,7 @@ def build_summary_table_html(results: list[ScenarioResult], useful_life_years: i
 <th>Exposição c/ BESS (BRL/ano)</th><th>Economia Bruta (BRL/ano)</th>
 <th>O&M (BRL/ano)</th><th>Economia Líquida Ano 1 (BRL/ano)</th>
 <th>Delta Saldo Líquido (BRL/ano)</th>
-<th>Payback (anos)</th><th>Cobertura</th>
+<th>Payback simples (anos)</th><th>Cobertura</th>
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>"""
@@ -231,7 +231,6 @@ def write_report(
     fig_payback = build_payback_curve(
         results,
         params.useful_life_years,
-        params.bess_degradation_pct_yr,
     )
     fig_var_cvar = build_var_cvar_chart(results)
     # Distribution and delta charts for the last (most complex) BESS scenario
@@ -284,7 +283,6 @@ section {{ margin: 24px 0; }}
 <li><strong>Vida útil:</strong> {params.useful_life_years} anos</li>
 <li><strong>Eficiência BESS:</strong> {params.bess_roundtrip_efficiency:.1%}</li>
 <li><strong>O&M BESS:</strong> {params.bess_o_and_m_pct_capex:.1%} do CAPEX ao ano</li>
-<li><strong>Degradação BESS:</strong> {params.bess_degradation_pct_yr:.1%} ao ano</li>
 </ul>
 </section>
 

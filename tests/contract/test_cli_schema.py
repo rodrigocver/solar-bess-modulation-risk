@@ -40,7 +40,7 @@ class TestCT01DefaultValues:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, csv, mwac, submarket, usd, rte_path, life, om, deg, lcoe
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, curtailment, _, _ = run_session()
 
@@ -61,7 +61,7 @@ class TestCT02OutOfBounds:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, CSV, MWac, submarket, usd=999(OOB), valid, rte_path, life, om, deg, lcoe
-        inputs = ["", "", valid_csv, "100", "", "999", "5.7", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "100", "", "999", "5.7", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -77,7 +77,7 @@ class TestCT03NonNumeric:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, CSV, MWac=abc then 100, rest defaults
-        inputs = ["", "", valid_csv, "abc", "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "abc", "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -96,7 +96,7 @@ class TestCT04WrongRowCount:
         bad_csv.write_text("\n".join("1.0" for _ in range(8761)))
 
         # Sequence: curt, charge_mode, bad CSV + mwac, re-prompt: valid CSV + mwac, then defaults
-        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -117,7 +117,7 @@ class TestCT05NegativeCSVValue:
         bad_csv.write_text("\n".join(values))
 
         # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", str(bad_csv), "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", str(bad_csv), "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -138,7 +138,7 @@ class TestCT06NonNumericCSV:
         values[10] = "hello"
         bad_csv.write_text("\n".join(values))
 
-        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -153,7 +153,7 @@ class TestCT07MissingCSVPath:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, bad path, then valid csv+mwac, then defaults
-        inputs = ["", "", "/nonexistent/file.csv", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", "/nonexistent/file.csv", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -203,7 +203,7 @@ class TestCT10MWacNonPositive:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, csv, mwac=0, mwac=-5, mwac=100, then defaults
-        inputs = ["", "", valid_csv, "0", "-5", "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "0", "-5", "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -219,7 +219,7 @@ class TestCT11ConfirmationSummary:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -236,7 +236,7 @@ class TestCT12ServiceAccountAbsent:
         from solar_bess_risk.cli import run_session
 
         # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", ""]
+        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session(service_account_path="/secret/key.json")
 

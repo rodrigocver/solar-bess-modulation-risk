@@ -10,10 +10,12 @@ from __future__ import annotations
 import os
 
 from solar_bess_risk.config import (
+    CURTAILMENT_ASSUMPTION_PCT_2026,
     DEFAULT_BQ_SUBMARKET,
-    DEFAULT_BESS_DEGRADATION_PCT_YR,
     DEFAULT_BESS_O_AND_M_PCT_CAPEX,
+    DEFAULT_CURTAILMENT_FACTOR_2026,
     DEFAULT_LCOE_DISCOUNT_RATE,
+    DEFAULT_PLD_FACTOR_2026,
     DEFAULT_RTE_PATH,
     DEFAULT_USD_BRL_RATE,
     DEFAULT_USEFUL_LIFE_YR,
@@ -216,14 +218,6 @@ def run_session(service_account_path: str | None = None) -> tuple:
         om_lo,
         om_hi,
     )
-    deg_lo, deg_hi = PARAM_BOUNDS["bess_degradation_pct_yr"]
-    bess_deg = _prompt_float(
-        "Degradação anual BESS",
-        "fração/ano",
-        DEFAULT_BESS_DEGRADATION_PCT_YR,
-        deg_lo,
-        deg_hi,
-    )
     lcoe_lo, lcoe_hi = PARAM_BOUNDS["lcoe_discount_rate"]
     lcoe_discount_rate = _prompt_float(
         "Taxa de retorno para LCOS/LCOE",
@@ -231,6 +225,38 @@ def run_session(service_account_path: str | None = None) -> tuple:
         DEFAULT_LCOE_DISCOUNT_RATE,
         lcoe_lo,
         lcoe_hi,
+    )
+
+    # 4. Fatores de preenchimento de dados de 2026
+    print()
+    print("  ── Fatores para preenchimento de 2026 ──")
+    print("  (Enter = usar default; 0 = usar valor do campo)")
+    pld_lo, pld_hi = PARAM_BOUNDS["pld_factor_2026"]
+    raw_pld_factor = input(
+        f"  Fator PLD 2026 (multiplica base 2025; Enter = auto via BigQuery): "
+    ).strip()
+    if raw_pld_factor == "":
+        pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
+    else:
+        try:
+            v = float(raw_pld_factor)
+        except ValueError:
+            print(f"  ERRO: valor '{raw_pld_factor}' não é numérico; usando auto.")
+            pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
+        else:
+            if not (pld_lo <= v <= pld_hi):
+                print(f"  ERRO: fator {v} fora de [{pld_lo}, {pld_hi}]; usando auto.")
+                pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
+            else:
+                pld_factor_2026 = v
+
+    curt_lo, curt_hi = PARAM_BOUNDS["curtailment_factor_2026"]
+    curtailment_factor_2026 = _prompt_float(
+        "Fator curtailment 2026 (multiplica perfil previsao_futura)",
+        "fração",
+        DEFAULT_CURTAILMENT_FACTOR_2026,
+        curt_lo,
+        curt_hi,
     )
 
     # Load RTE table for summary display (best-effort)
@@ -263,8 +289,13 @@ def run_session(service_account_path: str | None = None) -> tuple:
         print("  RTE por ano:      não carregado (fallback params)")
     print(f"  Vida útil:        {useful_life} anos")
     print(f"  O&M anual BESS:   {bess_om:.1%} do CAPEX")
-    print(f"  Degradação BESS:  {bess_deg:.1%} ao ano")
     print(f"  Taxa LCOS/LCOE:   {lcoe_discount_rate:.1%} ao ano")
+    if pld_factor_2026 is not None:
+        print(f"  Fator PLD 2026:   {pld_factor_2026:.4f} (manual)")
+    else:
+        print("  Fator PLD 2026:   auto (BigQuery)")
+    print(f"  Fator Curt. 2026: {curtailment_factor_2026:.4f}")
+    print(f"  Premissa curt. 2026: {CURTAILMENT_ASSUMPTION_PCT_2026:.1f} (fator planilha previsao_futura)")
 
     params = SimulationParams(
         csv_path=csv_path,
@@ -273,8 +304,9 @@ def run_session(service_account_path: str | None = None) -> tuple:
         usd_brl_rate=usd_brl,
         useful_life_years=useful_life,
         bess_o_and_m_pct_capex=bess_om,
-        bess_degradation_pct_yr=bess_deg,
         lcoe_discount_rate=lcoe_discount_rate,
         bq_service_account_path=service_account_path,
+        pld_factor_2026=pld_factor_2026,
+        curtailment_factor_2026=curtailment_factor_2026,
     )
     return params, curtailment_enabled, rte_path, charge_mode

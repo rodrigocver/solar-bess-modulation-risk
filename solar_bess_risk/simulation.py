@@ -4,6 +4,24 @@ Functions
 ---------
 simulate_scenario(solar, prices, scenario, params) -> DispatchResult
 simulate_all_scenarios(solar, prices, scenarios, params, progress_cb) -> list
+
+Modelo de despacho canônico
+---------------------------
+O modo de despacho **canônico** é o ``charge_mode == 3`` (arbitragem day-ahead,
+``_simulate_price_aware_dispatch``). Os modos legados ``0-2`` são mantidos apenas
+para retrocompatibilidade e testes; novos resultados de produção usam sempre o
+modo 3.
+
+Duas premissas estruturais do modo 3 ficam aqui documentadas explicitamente:
+
+1. **Previsão perfeita de PLD (foresight)** — o planejamento de cada dia conhece
+   antecipadamente a curva horária de PLD do próprio dia (``day_pld``). Trata-se
+   de uma hipótese otimista de backtest: superestima o valor da arbitragem em
+   relação à operação real com previsão imperfeita. Os resultados devem ser lidos
+   como um *limite superior* do ganho de arbitragem.
+2. **Gap operacional de 1 hora** — a BESS não pode carregar e descarregar em horas
+   consecutivas; é exigida ao menos 1 hora ociosa entre uma carga e uma descarga
+   (e vice-versa), em ambos os modos (legado e canônico).
 """
 
 from __future__ import annotations
@@ -192,9 +210,11 @@ def _plan_carryover_drain(
     *,
     current_soc: float,
     day_pld: np.ndarray,
+    day_gen: np.ndarray,
     day_curt: np.ndarray,
     bess_power: float,
     drain_deadline_hour: int,
+    must_mw: float | None = None,
 ) -> None:
     """Plan mandatory carryover drain before the 05:00 deadline."""
     carryover_remaining = current_soc
@@ -205,7 +225,10 @@ def _plan_carryover_drain(
     for h_local in sorted(dawn_candidates, key=lambda h: (-float(day_pld[h]), h)):
         if carryover_remaining <= 1e-10:
             break
-        disch = min(bess_power, carryover_remaining)
+        limit = bess_power
+        if must_mw is not None:
+            limit = min(limit, max(0.0, must_mw - day_gen[h_local]))
+        disch = min(limit, carryover_remaining)
         plan.discharge_mwh[h_local] = disch
         carryover_remaining -= disch
 
@@ -235,16 +258,31 @@ def _charge_sources_for_discharge(
     day_pld: np.ndarray,
     rte: float,
     drain_deadline_hour: int,
+    discharge_hours: set[int],
+    min_gap_hours: int = 1,
 ) -> list[tuple[float, int, str]]:
-    """Build charge candidates for a discharge hour, preserving current tie-breaks."""
+    """Build charge candidates for a discharge hour, preserving current tie-breaks.
+
+    A mandatory ``min_gap_hours`` idle gap is enforced between any charge hour
+    and any discharge hour (canonical mode-3 constraint): a charge candidate is
+    rejected when it sits within ``min_gap_hours`` of the target discharge hour
+    or of any already-committed discharge hour.
+    """
     charge_sources: list[tuple[float, int, str]] = []
     for charge_h_local in range(drain_deadline_hour, discharge_h_local):
         if charge_h_local == discharge_h_local:
             continue
+        # 1-hour (min_gap_hours) charge/discharge separation versus the target
+        # discharge hour and versus every already-committed discharge hour.
+        if discharge_h_local - charge_h_local <= min_gap_hours:
+            continue
+        if any(abs(charge_h_local - d) <= min_gap_hours for d in discharge_hours):
+            continue
         if day_curt[charge_h_local] - plan.charge_curt_mwh[charge_h_local] > 1e-10:
             charge_sources.append((0.0, charge_h_local, "curtailment"))
+        direct_solar_available = max(0.0, day_gen[charge_h_local] - day_curt[charge_h_local])
         if (
-            day_gen[charge_h_local] - plan.charge_solar_mwh[charge_h_local] > 1e-10
+            direct_solar_available - plan.charge_solar_mwh[charge_h_local] > 1e-10
             and rte * float(day_pld[discharge_h_local]) > float(day_pld[charge_h_local])
         ):
             charge_sources.append((float(day_pld[charge_h_local]), charge_h_local, "solar"))
@@ -262,6 +300,7 @@ def _optimise_day_ahead_plan(
     bess_energy: float,
     rte: float,
     drain_deadline_hour: int,
+    must_mw: float | None = None,
 ) -> _DailyDispatchPlan:
     """Create a linear day-ahead charge/discharge plan for one day."""
     plan = _empty_daily_dispatch_plan()
@@ -269,10 +308,20 @@ def _optimise_day_ahead_plan(
         plan,
         current_soc=current_soc,
         day_pld=day_pld,
+        day_gen=day_gen,
         day_curt=day_curt,
         bess_power=bess_power,
         drain_deadline_hour=drain_deadline_hour,
+        must_mw=must_mw,
     )
+
+    # Canonical mode-3 constraint: enforce a 1-hour idle gap between any charge
+    # and any discharge hour. Track committed charge/discharge hours so the
+    # day-ahead plan never schedules charge and discharge in adjacent hours.
+    # Carryover-drain discharge hours seed the discharge set before pairing.
+    min_gap_hours = 1
+    discharge_hours: set[int] = {h for h in range(24) if plan.discharge_mwh[h] > 1e-10}
+    charge_hours: set[int] = set()
 
     discharge_candidates = [
         h for h in range(drain_deadline_hour, 24)
@@ -282,7 +331,15 @@ def _optimise_day_ahead_plan(
         discharge_candidates,
         key=lambda h: (-float(day_pld[h]), h),
     ):
-        discharge_headroom = bess_power - plan.discharge_mwh[discharge_h_local]
+        # Skip discharge hours adjacent to an already-committed charge hour.
+        if any(
+            abs(discharge_h_local - c) <= min_gap_hours for c in charge_hours
+        ):
+            continue
+        limit = bess_power
+        if must_mw is not None:
+            limit = min(limit, max(0.0, must_mw - day_gen[discharge_h_local]))
+        discharge_headroom = limit - plan.discharge_mwh[discharge_h_local]
         if discharge_headroom <= 1e-10:
             continue
 
@@ -294,6 +351,8 @@ def _optimise_day_ahead_plan(
             day_pld=day_pld,
             rte=rte,
             drain_deadline_hour=drain_deadline_hour,
+            discharge_hours=discharge_hours,
+            min_gap_hours=min_gap_hours,
         )
 
         for _source_cost, charge_h_local, source in sorted(charge_sources):
@@ -309,7 +368,10 @@ def _optimise_day_ahead_plan(
             if source == "curtailment":
                 source_avail = day_curt[charge_h_local] - plan.charge_curt_mwh[charge_h_local]
             else:
-                source_avail = day_gen[charge_h_local] - plan.charge_solar_mwh[charge_h_local]
+                direct_solar_available = max(
+                    0.0, day_gen[charge_h_local] - day_curt[charge_h_local]
+                )
+                source_avail = direct_solar_available - plan.charge_solar_mwh[charge_h_local]
             if source_avail <= 1e-10:
                 continue
 
@@ -340,6 +402,9 @@ def _optimise_day_ahead_plan(
                 plan.charge_solar_mwh[charge_h_local] += charge_delta
             plan.discharge_mwh[discharge_h_local] += discharge_delta
             discharge_headroom -= discharge_delta
+            # Commit hours so the gap is honoured for the rest of the plan.
+            charge_hours.add(charge_h_local)
+            discharge_hours.add(discharge_h_local)
 
     return plan
 
@@ -363,6 +428,7 @@ def _execute_price_aware_day(
     residual: np.ndarray,
     curt_arr: np.ndarray,
     curt_lost: np.ndarray,
+    must_mw: float | None = None,
 ) -> float:
     """Execute an already-built daily plan in chronological order."""
     start = day * 24
@@ -383,21 +449,31 @@ def _execute_price_aware_day(
         if planned_discharge > 1e-10 and curt_h <= 1e-10:
             curt_lost[h_global] = curt_h
 
-            disch = min(planned_discharge, bess_power, current_soc)
+            limit = bess_power
+            if must_mw is not None:
+                limit = min(limit, max(0.0, must_mw - gen_h))
+            disch = min(planned_discharge, limit, current_soc)
             current_soc -= disch
             discharge[h_global] = disch
 
-            grid_inj[h_global] = gen_h - curt_h + discharge[h_global]
+            grid_inj[h_global] = max(0.0, gen_h - curt_h) + discharge[h_global]
             residual[h_global] = max(0.0, gf - grid_inj[h_global])
 
         elif planned_curt_charge + planned_solar_charge > 1e-10:
+            direct_solar_available = max(0.0, gen_h - curt_h)
             remaining_cap = bess_energy - current_soc
             if remaining_cap > 1e-10:
+                planned_curt_charge = min(planned_curt_charge, curt_h)
+                planned_solar_charge = min(planned_solar_charge, direct_solar_available)
                 planned_total_charge = planned_curt_charge + planned_solar_charge
-                charge_scale = min(1.0, remaining_cap / (planned_total_charge * rte))
-                ch_curt = planned_curt_charge * charge_scale
-                ch_solar = planned_solar_charge * charge_scale
-                current_soc += (ch_curt + ch_solar) * rte
+                if planned_total_charge > 1e-10:
+                    charge_scale = min(1.0, remaining_cap / (planned_total_charge * rte))
+                    ch_curt = planned_curt_charge * charge_scale
+                    ch_solar = planned_solar_charge * charge_scale
+                    current_soc += (ch_curt + ch_solar) * rte
+                else:
+                    ch_curt = 0.0
+                    ch_solar = 0.0
             else:
                 ch_curt = 0.0
                 ch_solar = 0.0
@@ -405,7 +481,7 @@ def _execute_price_aware_day(
             curt_lost[h_global] = max(0.0, curt_h - ch_curt)
             charge[h_global] = ch_curt + ch_solar
 
-            grid_inj[h_global] = max(0.0, gen_h - curt_h - ch_solar)
+            grid_inj[h_global] = max(0.0, direct_solar_available - ch_solar)
             residual[h_global] = max(0.0, gf - grid_inj[h_global])
 
         else:
@@ -447,9 +523,9 @@ def _must_excess_curtailment(
         Total available curtailment per hour in MW.
     """
     if must_mw is None or not np.isfinite(must_mw):
-        return ons_curt_arr + clip_arr
+        return np.minimum(gen_bess, ons_curt_arr + clip_arr)
     must_excess = np.maximum(0.0, gen_bess - must_mw)
-    return ons_curt_arr + np.maximum(clip_arr, must_excess)
+    return np.minimum(gen_bess, ons_curt_arr + np.maximum(clip_arr, must_excess))
 
 
 def _simulate_price_aware_dispatch(
@@ -474,6 +550,21 @@ def _simulate_price_aware_dispatch(
        opportunity cost (curtailment first at zero cost, then solar by PLD).
     4. A charge/discharge pair is accepted only when its marginal value is
        positive: ``rte × PLD_discharge > PLD_charge`` for solar charge.
+    5. A mandatory 1-hour idle gap separates any charge hour from any discharge
+       hour (no charge/discharge in consecutive hours). This is the canonical
+       mode-3 operational constraint and mirrors the legacy gap rule.
+
+    Premissas estruturais (ver docstring do módulo):
+
+    - **Previsão perfeita de PLD**: o planejamento usa a curva horária real do
+      dia (``day_pld``). É uma hipótese otimista de backtest — os ganhos de
+      arbitragem representam um limite superior frente à operação real.
+    - **Robustez do deadline de drenagem**: a drenagem de carryover é limitada
+      por ``min(bess_power, must_mw − geração)``. Sob um teto de MUST muito
+      agressivo combinado a geração não nula na madrugada, a janela de drenagem
+      pode ser insuficiente e a verificação ``SoC(05:00) ≈ 0`` levanta
+      ``SimulationConstraintError`` (falha explícita, sem mascarar o problema).
+      Com o sweep padrão (≤ 40%) e geração ~0 na madrugada isso não ocorre.
 
     Parameters
     ----------
@@ -552,6 +643,7 @@ def _simulate_price_aware_dispatch(
             bess_energy=bess_energy,
             rte=rte,
             drain_deadline_hour=drain_deadline_hour,
+            must_mw=must_mw,
         )
         current_soc = _execute_price_aware_day(
             day=day,
@@ -571,6 +663,7 @@ def _simulate_price_aware_dispatch(
             residual=residual,
             curt_arr=curt_arr,
             curt_lost=curt_lost,
+            must_mw=must_mw,
         )
 
     soc_deadline = soc[24 + drain_deadline_hour - 1 :: 24]
@@ -747,7 +840,10 @@ def simulate_scenario(
             # deficit exists, keep draining at PCS limit so the day can end with
             # SoC = 0 without a forced over-power discharge at 23:00.
             target_h = deficit_h if deficit_h > 0.0 else bess_power
-            discharge_h = min(target_h, bess_power, current_soc)
+            limit = bess_power
+            if must_mw is not None:
+                limit = min(limit, max(0.0, must_mw - gen_h))
+            discharge_h = min(target_h, limit, current_soc)
             current_soc -= discharge_h
             discharge[h] = discharge_h
 
@@ -758,11 +854,14 @@ def simulate_scenario(
         # The master 1-hour gap rule applies to this drain too.
         if discharge_h <= 1e-10:
             deadline = _drain_deadline_exclusive(h, drain_deadline_hour)
-            normal_drain_hours = sum(
-                1 for future_h in range(h, deadline)
-                if curtailment_arr_input[future_h] <= 1e-10
-            )
-            needs_expanded_drain = current_soc > normal_drain_hours * bess_power + 1e-10
+            normal_drain_capacity = 0.0
+            for future_h in range(h, deadline):
+                if curtailment_arr_input[future_h] <= 1e-10:
+                    limit = bess_power
+                    if must_mw is not None:
+                        limit = min(limit, max(0.0, must_mw - gen[future_h]))
+                    normal_drain_capacity += limit
+            needs_expanded_drain = current_soc > normal_drain_capacity + 1e-10
 
         if (
             discharge_h <= 1e-10
@@ -784,7 +883,10 @@ def simulate_scenario(
                 deadline_hour=drain_deadline_hour,
             )
         ):
-            drain_h = min(bess_power, current_soc)
+            limit = bess_power
+            if must_mw is not None:
+                limit = min(limit, max(0.0, must_mw - gen_h))
+            drain_h = min(limit, current_soc)
             current_soc -= drain_h
             discharge[h] = drain_h
             discharge_h = drain_h
@@ -794,6 +896,7 @@ def simulate_scenario(
         # --- Phase 2: Charge from available sources (if allowed) ---
         charge_h = 0.0
         if can_charge and discharge_h <= 1e-10:
+            direct_solar_available = max(0.0, gen_h - curtailment_h)
             excesso_solar = max(0.0, effective_gen_h - gf)
             remaining_capacity = bess_energy - current_soc
             # Charging is limited by PCS/charge_power and remaining energy capacity.
@@ -829,6 +932,8 @@ def simulate_scenario(
         # Grid injection: effective generation + discharge (peak or drain) - solar charged
         carga_solar_grid = charge_h - min(curtailment_h, charge_h) if can_charge else 0.0
         grid_inj[h] = effective_gen_h + discharge_h - carga_solar_grid
+        if must_mw is not None and np.isfinite(must_mw):
+            grid_inj[h] = min(grid_inj[h], must_mw)
 
         # Update 1-hour gap state
         if discharge_h > 0.0:

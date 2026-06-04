@@ -230,11 +230,11 @@ def compute_scenario_economics(
     gross_savings = net_balance_delta
     annual_o_and_m = scenario.capex_brl * params.bess_o_and_m_pct_capex
     first_year_net_savings = gross_savings - annual_o_and_m
-    lifetime_net_savings, payback = _degraded_cashflow_payback(
+    lifetime_net_savings, payback = _discounted_cashflow_payback(
         capex_brl=scenario.capex_brl,
         gross_savings_brl=gross_savings,
         annual_o_and_m_brl=annual_o_and_m,
-        degradation_pct_yr=params.bess_degradation_pct_yr,
+        discount_rate=params.lcoe_discount_rate,
         useful_life_years=params.useful_life_years,
     )
 
@@ -297,19 +297,26 @@ def compute_scenario_economics(
     )
 
 
-def _degraded_cashflow_payback(
+def _discounted_cashflow_payback(
     *,
     capex_brl: float,
     gross_savings_brl: float,
     annual_o_and_m_brl: float,
-    degradation_pct_yr: float,
+    discount_rate: float,
     useful_life_years: int,
 ) -> tuple[float, float | None]:
-    """Return lifetime net savings and simple payback with annual degradation."""
+    """Return lifetime net savings and simple/nominal payback.
+
+    Battery capacity fade is intentionally NOT modelled here with a fixed annual
+    factor. Degradation is governed exclusively by the manufacturer SOH curve in
+    ``projection.project_cashflows_with_rte`` (the canonical cashflow). This
+    single-year helper therefore keeps gross savings flat. Payback is reported
+    on a simple/nominal basis; discounting is reserved for LCOS.
+    """
     cumulative = 0.0
     previous = 0.0
     for year in range(1, useful_life_years + 1):
-        net = gross_savings_brl * ((1 - degradation_pct_yr) ** (year - 1)) - annual_o_and_m_brl
+        net = gross_savings_brl - annual_o_and_m_brl
         cumulative += net
         if cumulative >= capex_brl:
             if net <= 0:

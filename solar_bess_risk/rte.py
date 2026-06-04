@@ -87,3 +87,59 @@ def load_rte_table(
         int(commissioning_year + row[ANO_COLUMN]): float(row[RTE_COLUMN])
         for _, row in df.iterrows()
     }
+
+
+def load_bess_degradation_df(path: str = DEFAULT_RTE_PATH) -> pd.DataFrame:
+    """Load the Envision Excel file containing Ano, SOH, RTE_PMI columns.
+
+    Parameters
+    ----------
+    path : str
+        Path to the Excel file (default: ``dados/11 - Envision.xlsx``).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns 'Ano', 'SOH', 'RTE_PMI'.
+    """
+    try:
+        df = pd.read_excel(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Arquivo de RTE/degradação não encontrado: '{path}'"
+        )
+    except Exception as exc:
+        raise ValueError(f"Erro ao ler arquivo de RTE/degradação '{path}': {exc}") from exc
+
+    df.columns = [str(c).strip() for c in df.columns]
+    required = {"Ano", "SOH", "RTE_PMI"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Colunas ausentes para degradação em '{path}': {sorted(missing)}. "
+            f"Colunas disponíveis: {list(df.columns)}"
+        )
+
+    df = df[["Ano", "SOH", "RTE_PMI"]].dropna()
+    df["Ano"] = pd.to_numeric(df["Ano"], errors="coerce")
+    df["SOH"] = pd.to_numeric(df["SOH"], errors="coerce")
+    df["RTE_PMI"] = pd.to_numeric(df["RTE_PMI"], errors="coerce")
+    df = df.dropna()
+
+    return df
+
+
+def load_soh_table(
+    path: str = DEFAULT_RTE_PATH,
+    commissioning_year: int = DEFAULT_RTE_COMMISSIONING_YEAR,
+) -> dict[int, float]:
+    """Load per-year battery SOH from the Envision Excel file.
+
+    The Excel column ``Ano`` is 0-based BESS age (0 = first year of operation).
+    Calendar year = commissioning_year + Ano.
+    """
+    df = load_bess_degradation_df(path)
+    return {
+        int(commissioning_year + row["Ano"]): float(row["SOH"])
+        for _, row in df.iterrows()
+    }

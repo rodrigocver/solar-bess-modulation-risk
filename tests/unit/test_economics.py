@@ -232,7 +232,7 @@ class TestPayback:
     """Payback formula tests."""
 
     def test_payback_formula(self, scenario_a_with_dispatch, uniform_price_profile, params):
-        """payback follows degraded net annual cash flows."""
+        """payback follows simple nominal net annual cash flows."""
         from solar_bess_risk.economics import compute_scenario_economics
         from solar_bess_risk.profile import SolarProfile
 
@@ -244,20 +244,8 @@ class TestPayback:
         )
         result = compute_scenario_economics(solar, uniform_price_profile, scenario, dispatch, params)
         if result.annual_savings_brl > 0:
-            cumulative = 0.0
-            previous = 0.0
-            expected_payback = None
-            for year in range(1, params.useful_life_years + 1):
-                net = (
-                    result.annual_gross_savings_brl
-                    * ((1 - params.bess_degradation_pct_yr) ** (year - 1))
-                    - result.annual_o_and_m_brl
-                )
-                cumulative += net
-                if cumulative >= scenario.capex_brl:
-                    expected_payback = (year - 1) + (scenario.capex_brl - previous) / net
-                    break
-                previous = cumulative
+            net = result.annual_gross_savings_brl - result.annual_o_and_m_brl
+            expected_payback = scenario.capex_brl / net
             assert expected_payback is not None
             assert abs(result.payback_years - expected_payback) < 1e-6
 

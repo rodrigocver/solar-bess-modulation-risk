@@ -337,8 +337,10 @@ class TestDeadlineDrain:
             solar_profile, price_profile, scenario, params, curtailment_series=curtailment
         )
 
+        physical_curtailment = min(curtailment[11], solar_profile.generation_mw[11])
+        assert abs(result.curtailment_mwh[11] - physical_curtailment) < 1e-9
         assert abs(result.charge_mwh[11] - scenario.bess_power_mw) < 1e-9
-        assert result.curtailment_lost_mwh[11] >= curtailment[11] - scenario.bess_power_mw - 1e-9
+        assert result.curtailment_lost_mwh[11] >= physical_curtailment - scenario.bess_power_mw - 1e-9
         assert np.all(result.soc_mwh[28::24] < 1e-9)
         assert np.all(result.discharge_mwh <= scenario.bess_power_mw + 1e-10)
 

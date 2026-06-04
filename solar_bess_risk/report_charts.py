@@ -109,9 +109,13 @@ def build_capex_savings_bar_chart(
 def build_payback_curve(
     results: list[ScenarioResult],
     useful_life_years: int = 20,
-    degradation_pct_yr: float = 0.02,
 ) -> go.Figure:
-    """Build payback curve: cumulative savings over years per scenario.
+    """Build payback curve: cumulative nominal savings over years per scenario.
+
+    Battery degradation is governed by the manufacturer SOH curve in the
+    canonical projection cashflow; this chart applies no fixed annual fade and
+    no financial discounting. The CAPEX crossing point therefore matches the
+    reported simple/nominal payback.
 
     Parameters
     ----------
@@ -132,10 +136,7 @@ def build_payback_curve(
         cumulative = 0.0
         cum_savings = []
         for year in years:
-            net = (
-                r.annual_gross_savings_brl * ((1 - degradation_pct_yr) ** (year - 1))
-                - r.annual_o_and_m_brl
-            )
+            net = r.annual_gross_savings_brl - r.annual_o_and_m_brl
             cumulative += net
             cum_savings.append(cumulative)
         legend_name = f"Cenário {r.scenario.label}"
@@ -160,7 +161,7 @@ def build_payback_curve(
         ))
 
     fig.update_layout(
-        title="Curva de Payback: Economia Acumulada vs Anos",
+        title="Curva de Payback Simples: Economia Nominal Acumulada vs Anos",
         xaxis_title="Ano",
         yaxis_title="Economia Acumulada (BRL)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -377,12 +378,14 @@ def must_sensitivity_chart(result: "MustOptimizationResult") -> go.Figure:
         x=reductions_pct,
         y=net_benefit,
         mode="lines+markers",
-        name="Benefício líquido",
+        name="Benefício líquido (TUST + Δ saldo)",
         line=dict(color="#1f77b4", width=3),
         marker=dict(size=6),
         hovertemplate=(
             "Redução de MUST: %{x:.0f}%<br>"
-            "Benefício líquido: %{y:,.0f} R$/ano<extra></extra>"
+            "Benefício líquido: %{y:,.0f} R$/ano<br>"
+            "<span style='font-size:11px'>Economia de TUST + Δ saldo líquido</span>"
+            "<extra></extra>"
         ),
     ))
     fig.add_trace(go.Scatter(
@@ -400,11 +403,13 @@ def must_sensitivity_chart(result: "MustOptimizationResult") -> go.Figure:
         x=reductions_pct,
         y=net_balance_delta,
         mode="lines",
-        name="Δ Saldo líquido",
+        name="Δ saldo líquido (vs. 0%)",
         line=dict(color="#d62728", width=1.5, dash="dot"),
         hovertemplate=(
             "Redução de MUST: %{x:.0f}%<br>"
-            "Δ Saldo líquido: %{y:,.0f} R$/ano<extra></extra>"
+            "Δ saldo líquido: %{y:,.0f} R$/ano<br>"
+            "<span style='font-size:11px'>Saldo líquido com redução - saldo líquido base (0%)</span>"
+            "<extra></extra>"
         ),
     ))
     fig.add_trace(go.Scatter(
@@ -423,9 +428,14 @@ def must_sensitivity_chart(result: "MustOptimizationResult") -> go.Figure:
         title=(
             f"Sensibilidade da Redução de MUST — Cenário "
             f"{result.scenario_label} ({result.duration_h}h)"
+            "<br><sup>Benefício líquido = economia de TUST + Δ saldo líquido. "
+            "Δ saldo líquido = saldo com redução de MUST - saldo base sem redução.</sup>"
         ),
         xaxis_title="Redução de MUST (%)",
         yaxis_title="Benefício líquido anual (R$/ano)",
+        yaxis=dict(range=[-10_000_000, 10_000_000]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(t=105),
     )
+    fig.update_xaxes(range=[0, 15])
     return fig

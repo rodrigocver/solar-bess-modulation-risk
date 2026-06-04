@@ -162,6 +162,7 @@ def compute_historical_risk_metrics(
     curtailment_series: np.ndarray | None = None,
     confidence: float = 0.95,
     max_solar_years: int | None = None,
+    must_mw: float | None = None,
 ) -> dict:
     """Compute VaR/CVaR using every available historical solar year.
 
@@ -191,6 +192,7 @@ def compute_historical_risk_metrics(
             params,
             curtailment_series=curtailment_series,
             solar_year_idx=year_idx,
+            must_mw=must_mw,
         )
         gen_lim, _gen_bess = solar.get_year_arrays(year_idx)
         injection_sem = gen_lim - dispatch.ons_curtailment_mwh

@@ -29,9 +29,10 @@ def test_fetch_pld_for_historical_year_uses_local_file(monkeypatch):
         lambda params: (_ for _ in ()).throw(AssertionError("BigQuery should not be used")),
     )
 
-    result = main_mod._fetch_pld_for_year(2025, params)
+    result, factor = main_mod._fetch_pld_for_year(2025, params)
 
     assert result is local_profile
+    assert factor is None
 
 
 def test_fetch_pld_for_2026_uses_bigquery_observed_and_local_2025_base(monkeypatch):
@@ -84,7 +85,8 @@ def test_fetch_pld_for_2026_uses_bigquery_observed_and_local_2025_base(monkeypat
     monkeypatch.setattr(backtest_mod, "_fetch_observed_primary_series", fake_fetch_observed)
     monkeypatch.setattr(backtest_mod, "_project_partial_year_prices", fake_project)
 
-    result = main_mod._fetch_pld_for_year(2026, params)
+    result, factor = main_mod._fetch_pld_for_year(2026, params)
 
     assert result is projected_profile
+    assert factor == 1.25
     assert loaded_years == [2025]

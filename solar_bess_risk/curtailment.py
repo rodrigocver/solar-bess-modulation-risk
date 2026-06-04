@@ -88,6 +88,7 @@ def get_curtailment_for_scenario(
     enabled: bool,
     solar_generation_mw: np.ndarray,
     path: str = DEFAULT_CURTAILMENT_PATH,
+    factor_2026: float = 1.0,
 ) -> np.ndarray | None:
     """Get the curtailment profile in MW for a given backtest year.
 
@@ -101,6 +102,9 @@ def get_curtailment_for_scenario(
         Solar generation array (8760,) in MW. Used to convert pct→MW.
     path : str
         Path to curtailment Excel file.
+    factor_2026 : float
+        Scalar multiplier applied to the 2026 curtailment profile.  Default 1.0
+        (profile used as-is).  Only applied when ``year == 2026``.
 
     Returns
     -------
@@ -117,4 +121,6 @@ def get_curtailment_for_scenario(
         sheet = CURTAILMENT_SHEET_2025
 
     curtailment_pct = load_curtailment_profile(path, sheet)
+    if year == 2026 and factor_2026 != 1.0:
+        curtailment_pct = curtailment_pct * factor_2026
     return curtailment_pct * solar_generation_mw

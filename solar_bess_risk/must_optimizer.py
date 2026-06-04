@@ -8,6 +8,27 @@ and selects the one maximizing the net annual benefit:
 The initial MUST always equals the project AC power (``mwac``), so a reduction
 of ``pct`` yields ``must_mw = mwac × (1 − pct)`` and abdicates
 ``delta_must_mw = mwac × pct`` of contracted transmission capacity.
+
+Racional econômico (premissas documentadas)
+-------------------------------------------
+- **A economia de TUST só é viável com a BESS** (item 3.2). O projeto solar já
+  opera no limite de otimização do dimensionamento DC/AC; sem a BESS, reduzir o
+  MUST significaria simplesmente jogar fora (curtailment) a energia que excede o
+  teto, sem qualquer recuperação. A BESS é o que permite absorver parte desse
+  excedente e deslocá-lo para horas de PLD alto, tornando a redução de MUST uma
+  decisão economicamente racional. Por isso, **toda a economia de TUST é
+  legitimamente atribuída ao caso com BESS** — ela não existe no caso sem BESS.
+- **A baseline do otimizador é "BESS com MUST integral" (pct = 0)**. O termo
+  ``net_balance_com(must) − net_balance_com(0%)`` mede a variação marginal de
+  saldo de energia causada exclusivamente pela redução de MUST. A injeção sem
+  BESS se cancela nesse delta, isolando o efeito da política de MUST.
+- **A redução de MUST piora o saldo de energia, mas é compensada pela economia
+  de TUST** (item 4.1). Cortar o topo do perfil de injeção reduz a receita de
+  energia (``net_balance_delta`` tende a ser negativo), porém a economia de TUST
+  recorrente supera essa perda no ponto ótimo. O relatório exibe as duas parcelas
+  lado a lado (Δ saldo de energia e economia de TUST) propositadamente, para que
+  fique transparente esse trade-off: a redução de MUST "atrapalha" a economia de
+  energia, mas o ganho de TUST a compensa.
 """
 
 from __future__ import annotations

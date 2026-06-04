@@ -159,6 +159,15 @@ def test_envision_rte_file_locks_block_and_pcs_metadata():
     }
 
 
+def test_load_soh_table_reads_envision_curve():
+    from solar_bess_risk.rte import load_soh_table
+
+    soh = load_soh_table("dados/11 - Envision.xlsx")
+
+    assert soh[2025] == pytest.approx(1.0)
+    assert soh[2026] < soh[2025]
+
+
 def test_load_price_local_pld_filters_submarket_and_returns_8760(tmp_path):
     from solar_bess_risk.data_sources import load_price_local_pld
 

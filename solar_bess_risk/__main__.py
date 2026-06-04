@@ -31,7 +31,7 @@ from solar_bess_risk.manifest import RunManifest, generate_run_id, hash_params, 
 from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.projection import project_cashflows_with_rte
 from solar_bess_risk.report_excel import build_excel_report, build_html_report
-from solar_bess_risk.rte import get_rte_metadata, load_rte_table
+from solar_bess_risk.rte import get_rte_metadata, load_rte_table, load_soh_table
 from solar_bess_risk.risk_metrics import compute_historical_risk_metrics
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
@@ -73,14 +73,40 @@ def _get_scenario_for_duration(
     )
 
 
-def _fetch_pld_for_year(year: int, params: SimulationParams) -> PriceProfile:
-    """Load PLD for a given year, using local history and BigQuery only for 2026."""
+def _fetch_pld_for_year(year: int, params: SimulationParams) -> tuple[PriceProfile, float | None]:
+    """Load PLD for a given year, using local history and BigQuery only for 2026.
+
+    Returns
+    -------
+    tuple[PriceProfile, float | None]
+        The price profile and the effective PLD scaling factor for 2026 (None for
+        other years). For manual mode the factor is ``params.pld_factor_2026``; for
+        the auto/BigQuery mode it is the ratio computed from observed vs. projected
+        prices.
+    """
     year_params = replace(params, bq_year=year)
 
     if 2021 <= year <= 2025:
-        return load_price_local_pld(year, params.bq_submarket)
+        return load_price_local_pld(year, params.bq_submarket), None
 
     if year == 2026:
+        if params.pld_factor_2026 is not None:
+            # Use the manually supplied factor — skip BigQuery entirely
+            import numpy as np
+            base_profile = load_price_local_pld(2025, params.bq_submarket)
+            prices = np.array(base_profile.prices_brl_per_mwh, dtype=np.float64) * params.pld_factor_2026
+            print(
+                f"    2026: fator PLD manual={params.pld_factor_2026:.4f}; "
+                "completando ano escalando base local 2025 (sem BigQuery)."
+            )
+            from solar_bess_risk.data_sources import PriceProfile
+            return PriceProfile(
+                prices_brl_per_mwh=prices,
+                source=f"local_pld_2025_scaled_factor_{params.pld_factor_2026:.4f}",
+                bq_submarket=params.bq_submarket,
+                bq_year=2026,
+            ), params.pld_factor_2026
+
         from solar_bess_risk.backtest import (
             _fetch_observed_primary_series,
             _project_partial_year_prices,
@@ -105,9 +131,9 @@ def _fetch_pld_for_year(year: int, params: SimulationParams) -> PriceProfile:
             f"{result.metadata.projected_hours} horas projetadas "
             f"(fator={result.metadata.projection_factor:.4f})."
         )
-        return result.profile
+        return result.profile, result.metadata.projection_factor
 
-    return fetch_price_bigquery(year_params)
+    return fetch_price_bigquery(year_params), None
 
 
 def _build_run_manifest(
@@ -168,7 +194,6 @@ def _build_run_manifest(
             "usd_brl_rate": params.usd_brl_rate,
             "useful_life_years": params.useful_life_years,
             "bess_o_and_m_pct_capex": params.bess_o_and_m_pct_capex,
-            "bess_degradation_pct_yr": params.bess_degradation_pct_yr,
             "lcoe_discount_rate": params.lcoe_discount_rate,
             "tust_brl_per_kw_month": params.tust_brl_per_kw_month,
             "must_sweep_max_pct": params.must_sweep_max_pct,
@@ -240,6 +265,7 @@ def _compute_must_reduction_scenarios(
     curtailment_enabled: bool,
     charge_mode: int,
     rte_table: dict[int, float],
+    soh_table: dict[int, float],
     rte_fallback: float,
 ) -> tuple[dict[str, tuple], list[dict]]:
     """Optimize MUST reduction per backtest year for the 4h scenario.
@@ -266,6 +292,8 @@ def _compute_must_reduction_scenarios(
         Dispatch charge mode.
     rte_table : dict[int, float]
         Per-year round-trip efficiency.
+    soh_table : dict[int, float]
+        Per-year battery state of health.
     rte_fallback : float
         RTE used when a year is missing from ``rte_table``.
 
@@ -276,7 +304,7 @@ def _compute_must_reduction_scenarios(
         a comparative label to a data tuple shaped like ``results_by_key`` and
         ``dispatch_records`` carries hourly dispatch metadata for CSV export.
     """
-    from solar_bess_risk.must_optimizer import optimize_must_reduction
+    from solar_bess_risk.must_optimizer import optimize_must_reduction, tust_annual_savings_brl
 
     dur = MUST_REDUCTION_DURATION_H
     _gen_lim = (
@@ -295,7 +323,9 @@ def _compute_must_reduction_scenarios(
             year, f"pld_{params.bq_submarket}_{year}"
         )
         price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
-        curt_series = get_curtailment_for_scenario(year, curtailment_enabled, _gen_lim)
+        curt_series = get_curtailment_for_scenario(
+            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+        )
 
         scenario = _get_scenario_for_duration(
             dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
@@ -319,6 +349,38 @@ def _compute_must_reduction_scenarios(
             must_mw=must_mw,
         )
 
+        # TUST annual savings at the optimal MUST reduction point
+        tust_savings_brl_yr = tust_annual_savings_brl(
+            tust_brl_per_kw_month=params.tust_brl_per_kw_month,
+            delta_must_mw=params.mwac * opt.optimal_reduction_pct,
+        )
+
+        # Compute cashflow projection (LCOS/payback) using the MUST-capped dispatch
+        projection = project_cashflows_with_rte(
+            solar=solar,
+            pld=pld,
+            price_source=price_source,
+            bq_submarket=params.bq_submarket,
+            scenario=scenario,
+            params=params,
+            curtailment_series=curt_series,
+            rte_table=rte_table,
+            start_year=year,
+            must_mw=must_mw,
+            soh_table=soh_table,
+            tust_savings_brl_per_yr=tust_savings_brl_yr,
+        )
+
+        # Compute historical risk metrics (CVaR) under the MUST cap
+        risk_metrics = compute_historical_risk_metrics(
+            solar=solar,
+            prices=price_profile,
+            scenario=scenario,
+            params=params,
+            curtailment_series=curt_series,
+            must_mw=must_mw,
+        )
+
         pct_label = f"{opt.optimal_reduction_pct * 100:.0f}%"
         key = f"{year} - {dur}h redução de MUST ({pct_label})"
         reduction_by_key[key] = (
@@ -331,8 +393,9 @@ def _compute_must_reduction_scenarios(
             year,
             rte_year,
             scenario,
-            None,
-            None,
+            projection,
+            risk_metrics,
+            tust_savings_brl_yr,   # index 11: annual TUST savings from MUST reduction
         )
         dispatch_records.append(
             {
@@ -360,12 +423,14 @@ def _compute_must_results(
     curtailment_enabled: bool,
     charge_mode: int,
     rte_table: dict[int, float],
+    soh_table: dict[int, float],
     rte_fallback: float,
 ) -> list:
-    """Run the MUST reduction optimizer for each duration scenario.
+    """Run the MUST reduction optimizer for each backtest year × duration.
 
-    Uses the most recent backtest year as the representative price/curtailment
-    context for the MUST decision.
+    Presents both hypothetical backtest years (e.g. 2025 and 2026) as separate
+    scenarios, each with its own optimal MUST reduction. The returned results are
+    relabelled with the year prefix so the report can distinguish them.
 
     Parameters
     ----------
@@ -391,39 +456,43 @@ def _compute_must_results(
     Returns
     -------
     list
-        One ``MustOptimizationResult`` per duration scenario.
+        One ``MustOptimizationResult`` per (backtest year × duration scenario),
+        each ``scenario_label`` prefixed with its year.
     """
     from solar_bess_risk.must_optimizer import optimize_must_reduction
-
-    ref_year = max(pld_by_year)
-    pld = pld_by_year[ref_year]
-    rte_year = rte_table.get(ref_year, rte_fallback)
-    price_source = price_sources_by_year.get(
-        ref_year, f"pld_{params.bq_submarket}_{ref_year}"
-    )
-    price_profile = PriceProfile(pld, price_source, params.bq_submarket, ref_year)
 
     _gen_lim = (
         solar.generation_lim_mw
         if solar.generation_lim_mw is not None
         else solar.generation_mw
     )
-    curt_series = get_curtailment_for_scenario(ref_year, curtailment_enabled, _gen_lim)
 
     must_results = []
-    for dur in DURATIONS:
-        scenario = _get_scenario_for_duration(
-            dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+    for year in BACKTEST_YEARS:
+        pld = pld_by_year[year]
+        rte_year = rte_table.get(year, rte_fallback)
+        price_source = price_sources_by_year.get(
+            year, f"pld_{params.bq_submarket}_{year}"
         )
-        must_results.append(
-            optimize_must_reduction(
+        price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
+        curt_series = get_curtailment_for_scenario(
+            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+        )
+
+        for dur in DURATIONS:
+            scenario = _get_scenario_for_duration(
+                dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+            )
+            opt = optimize_must_reduction(
                 solar,
                 price_profile,
                 scenario,
                 params,
                 curtailment_series=curt_series,
             )
-        )
+            must_results.append(
+                replace(opt, scenario_label=f"{year} · {opt.scenario_label}")
+            )
     return must_results
 
 
@@ -486,11 +555,16 @@ def main() -> None:
     # Load RTE table (per-year round-trip efficiency)
     try:
         rte_table = load_rte_table(rte_path)
+        soh_table = load_soh_table(rte_path)
         rte_fallback = rte_table[min(rte_table)]
-        print(f"  RTE carregado: {len(rte_table)} anos, 1º ano={rte_fallback:.4f}")
+        print(
+            f"  RTE/SOH carregados: {len(rte_table)} anos, "
+            f"1º ano RTE={rte_fallback:.4f}, SOH={soh_table[min(soh_table)]:.4f}"
+        )
     except (FileNotFoundError, ValueError) as e:
-        print(f"  AVISO: RTE não carregado ({e}). Usando params.bess_roundtrip_efficiency.")
+        print(f"  AVISO: RTE/SOH não carregado ({e}). Usando params.bess_roundtrip_efficiency.")
         rte_table = {}
+        soh_table = {}
         rte_fallback = params.bess_roundtrip_efficiency
 
     rte_metadata = get_rte_metadata(rte_path)
@@ -499,13 +573,16 @@ def main() -> None:
     print("[2/5] Carregando preços PLD...")
     pld_by_year: dict[int, np.ndarray] = {}
     price_sources_by_year: dict[int, str] = {}
+    effective_pld_factor_2026: float | None = None
 
     for year in BACKTEST_YEARS:
         print(f"  PLD {year}...")
         try:
-            prices = _fetch_pld_for_year(year, params)
+            prices, year_factor = _fetch_pld_for_year(year, params)
             pld_by_year[year] = prices.prices_brl_per_mwh
             price_sources_by_year[year] = prices.source
+            if year == 2026 and year_factor is not None:
+                effective_pld_factor_2026 = year_factor
         except DataSourceError as e:
             print(f"\nERRO ao buscar PLD {year}: {e}", file=sys.stderr)
             sys.exit(1)
@@ -517,7 +594,9 @@ def main() -> None:
     for year in BACKTEST_YEARS:
         # ONS curtailment is scaled by sem-BESS generation (gen_lim)
         _gen_lim = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
-        curt_series = get_curtailment_for_scenario(year, curtailment_enabled, _gen_lim)
+        curt_series = get_curtailment_for_scenario(
+            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+        )
         pld = pld_by_year[year]
         rte_year = rte_table.get(year, rte_fallback)
 
@@ -548,6 +627,7 @@ def main() -> None:
                 curtailment_series=curt_series,
                 rte_table=rte_table,
                 start_year=year,
+                soh_table=soh_table,
             )
             risk_metrics = compute_historical_risk_metrics(
                 solar=solar,
@@ -579,6 +659,7 @@ def main() -> None:
             curtailment_enabled=curtailment_enabled,
             charge_mode=charge_mode,
             rte_table=rte_table,
+            soh_table=soh_table,
             rte_fallback=rte_fallback,
         )
         for r in must_results:
@@ -600,6 +681,7 @@ def main() -> None:
                 curtailment_enabled=curtailment_enabled,
                 charge_mode=charge_mode,
                 rte_table=rte_table,
+                soh_table=soh_table,
                 rte_fallback=rte_fallback,
             )
         )
@@ -668,8 +750,32 @@ def main() -> None:
         rte_metadata=rte_metadata,
         must_results=must_results,
         must_reduction_by_key=must_reduction_by_key,
+        effective_pld_factor_2026=effective_pld_factor_2026,
     )
     print(f"  Relatório Diretoria: {consultancy_path}")
+
+    # =========================================================================
+    # GATILHO AUTOMÁTICO: AGENTE PITCH DIRETORIA BESS
+    # =========================================================================
+    try:
+        print("  [Agente BESS] Iniciando geração do Dashboard Financeiro Executivo...")
+        # Mapeia a pasta .agents que está na raiz do seu projeto
+        pasta_agente = Path(__file__).resolve().parent.parent / ".agents"
+        sys.path.append(str(pasta_agente))
+
+        import bess_pitch_agent
+
+        caminho_pitch_saida = output_dir / "pitch_diretoria_bess.html"
+
+        # Executa o pipeline de inteligência e matemática do seguro
+        dados_operacionais = bess_pitch_agent.extrair_kpis_do_relatorio(str(output_dir / "relatorio_diretoria.html"))
+        dados_financeiros = bess_pitch_agent.calcular_premio_seguro(dados_operacionais)
+        bess_pitch_agent.gerar_html_apresentacao(dados_financeiros, str(caminho_pitch_saida))
+
+        print(f"  [Agente BESS] Dashboard gerado com sucesso: {caminho_pitch_saida}")
+    except Exception as e:
+        print(f"  [Aviso Agente BESS] Não foi possível rodar o dashboard automático: {e}")
+    # =========================================================================
 
     # 6. Write manifest
     print("[5/6] Salvando manifest...")
