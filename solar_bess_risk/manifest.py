@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ class RunManifest:
     tool_version : str
         Semantic version string (e.g. ``"2.0.0"``).
     run_id : str
-        ``YYYYMMDD-HHMMSS-v<tool_version>``.
+        ``YYYYMMDD-HHMMSS-<branch>``.
     timestamp_iso8601 : str
         ISO 8601 timestamp with timezone.
     params_sha256 : str
@@ -69,8 +70,24 @@ class RunManifest:
     rte: dict | None = None
 
 
+def _current_branch() -> str:
+    """Return the current git branch name, or 'unknown' if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branch = result.stdout.strip()
+        # Sanitize: replace characters not safe for directory names
+        return branch.replace("/", "-").replace("\\", "-") or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def generate_run_id() -> str:
-    """Generate a run ID in the format ``YYYYMMDD-HHMMSS-v<version>``.
+    """Generate a run ID in the format ``YYYYMMDD-HHMMSS-<branch>``.
 
     Returns
     -------
@@ -79,8 +96,8 @@ def generate_run_id() -> str:
     """
     now = datetime.now(SAO_PAULO_TZ)
     ts = now.strftime("%Y%m%d-%H%M%S")
-    version_slug = __version__.replace(".", "_")
-    return f"{ts}-v{version_slug}"
+    branch = _current_branch()
+    return f"{ts}-{branch}"
 
 
 def hash_params(params: SimulationParams) -> str:
