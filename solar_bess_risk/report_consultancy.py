@@ -413,6 +413,64 @@ def _build_coverage_chart(results_by_key: dict[str, tuple]) -> str:
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
+_CASE_LABELS: dict[int, str] = {2025: "Caso Geral", 2026: "Caso Estressado"}
+
+
+def _build_comparative_summary(
+    results_by_key: dict[str, tuple],
+    must_reduction_by_key: dict[str, tuple] | None,
+    mwac: float,
+    usd_brl_rate: float,
+    garantia_fisica_mw: float,
+    fc: float,
+) -> str:
+    """Build the comparative summary grouped by backtest year.
+
+    Each year renders its own KPI table (regular scenarios + the optional
+    MUST-reduction scenario for that year). 2025 is labelled "Caso Geral" and
+    2026 "Caso Estressado".
+
+    Parameters
+    ----------
+    results_by_key : dict
+        Regular per-scenario results. The year is ``data[6]``.
+    must_reduction_by_key : dict | None
+        Optional MUST-reduction scenarios (year in ``data[6]``), appended to
+        the matching year's table.
+    mwac, usd_brl_rate, garantia_fisica_mw, fc : float
+        Forwarded to ``_build_kpi_table``.
+
+    Returns
+    -------
+    str
+        HTML fragment with one sub-section (h3 + table) per year.
+    """
+    reduction = must_reduction_by_key or {}
+
+    # Preserve first-seen order of years across both dicts.
+    years: list[int] = []
+    for data in list(results_by_key.values()) + list(reduction.values()):
+        year = data[6]
+        if year not in years:
+            years.append(year)
+
+    sections: list[str] = []
+    for year in years:
+        grouped: dict[str, tuple] = {
+            k: v for k, v in results_by_key.items() if v[6] == year
+        }
+        grouped.update({k: v for k, v in reduction.items() if v[6] == year})
+        if not grouped:
+            continue
+        case_label = _CASE_LABELS.get(year, "Cenário")
+        table = _build_kpi_table(grouped, mwac, usd_brl_rate, garantia_fisica_mw, fc)
+        sections.append(
+            f'<h3 class="case-heading">{escape(case_label)} ({year})</h3>\n{table}'
+        )
+
+    return "\n".join(sections)
+
+
 def _build_kpi_table(
     results_by_key: dict[str, tuple],
     mwac: float,
@@ -788,6 +846,7 @@ def build_consultancy_report(
     charge_mode: int = 0,
     rte_metadata: dict[str, float | str] | None = None,
     must_results: list | None = None,
+    must_reduction_by_key: dict[str, tuple] | None = None,
 ) -> str:
     """Build a consultancy-style HTML report with tabs per scenario.
 
@@ -820,7 +879,14 @@ def build_consultancy_report(
     # Build overview charts (cross-scenario)
     modulation_chart = _build_modulation_comparison_chart(results_by_key)
     coverage_chart = _build_coverage_chart(results_by_key)
-    kpi_table = _build_kpi_table(results_by_key, mwac, usd_brl_rate, garantia_fisica_mw, fc)
+    kpi_table = _build_comparative_summary(
+        results_by_key,
+        must_reduction_by_key,
+        mwac,
+        usd_brl_rate,
+        garantia_fisica_mw,
+        fc,
+    )
     params_table = _build_simulation_params_table(
         params=params,
         charge_mode=charge_mode,
@@ -1086,7 +1152,7 @@ footer {{
 
 <!-- Resumo Comparativo -->
 <div class="card">
-    <h2>Resumo Comparativo — Todos os Cenários</h2>
+    <h2>Resumo Comparativo — Caso Geral (2025) vs Caso Estressado (2026)</h2>
     {kpi_table}
     <div class="chart-container">{modulation_chart}</div>
     <div class="chart-container">{coverage_chart}</div>

@@ -27,16 +27,17 @@ def sample_params() -> SimulationParams:
 
 
 class TestGenerateRunId:
-    """Run-ID format: YYYYMMDD-HHMMSS-v<version>."""
+    """Run-ID format: YYYYMMDD-HHMMSS-<branch>."""
 
     def test_run_id_format(self):
         run_id = generate_run_id()
-        pattern = r"^\d{8}-\d{6}-v\d+_\d+_\d+$"
+        pattern = r"^\d{8}-\d{6}-.+$"
         assert re.match(pattern, run_id), f"Run ID '{run_id}' does not match pattern"
 
-    def test_run_id_contains_version_suffix(self):
+    def test_run_id_contains_branch_suffix(self):
         run_id = generate_run_id()
-        assert run_id.endswith("-v2_0_0")
+        from solar_bess_risk.manifest import _current_branch
+        assert run_id.endswith(f"-{_current_branch()}")
 
 
 class TestHashParams:

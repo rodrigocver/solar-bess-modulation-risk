@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -243,3 +244,77 @@ def optimize_must_reduction(
         optimal_net_benefit_brl_per_yr=best.net_benefit_brl_per_yr,
         sweep=sweep,
     )
+
+
+def write_must_reduction_dispatch_csv(
+    *,
+    year: int,
+    duration_h: int,
+    optimal_reduction_pct: float,
+    must_mw: float,
+    mwac: float,
+    dispatch,
+    pld: np.ndarray,
+    output_dir: str | Path,
+) -> Path:
+    """Write the hourly (8760h) dispatch under the optimal MUST cap to CSV.
+
+    Parameters
+    ----------
+    year : int
+        Backtest year of the scenario.
+    duration_h : int
+        BESS duration in hours.
+    optimal_reduction_pct : float
+        Optimal MUST reduction fraction (0-1).
+    must_mw : float
+        MUST injection cap in MW under the optimum.
+    mwac : float
+        Project AC power in MW (initial MUST).
+    dispatch : DispatchResult
+        Dispatch result simulated under ``must_mw``.
+    pld : np.ndarray
+        Hourly PLD in R$/MWh, shape ``(8760,)``.
+    output_dir : str | Path
+        Directory where the CSV is written.
+
+    Returns
+    -------
+    Path
+        Path to the written CSV file.
+    """
+    import pandas as pd
+
+    n = len(dispatch.grid_injection_mwh)
+    available = (
+        dispatch.curtailment_total_available_mwh
+        if dispatch.curtailment_total_available_mwh is not None
+        else dispatch.curtailment_mwh
+    )
+    recovered = (
+        dispatch.curtailment_recovered_mwh
+        if dispatch.curtailment_recovered_mwh is not None
+        else np.maximum(0.0, available - dispatch.curtailment_lost_mwh)
+    )
+    df = pd.DataFrame(
+        {
+            "hora": np.arange(n, dtype=int),
+            "pld_brl_per_mwh": pld[:n],
+            "must_mw": np.full(n, must_mw),
+            "injecao_rede_mwh": dispatch.grid_injection_mwh,
+            "carga_bess_mwh": dispatch.charge_mwh,
+            "descarga_bess_mwh": dispatch.discharge_mwh,
+            "soc_mwh": dispatch.soc_mwh,
+            "curtailment_disponivel_mwh": available,
+            "curtailment_absorvido_bess_mwh": recovered,
+            "curtailment_perdido_mwh": dispatch.curtailment_lost_mwh,
+            "deficit_mwh": dispatch.deficit_mwh,
+            "deficit_residual_mwh": dispatch.residual_deficit_mwh,
+        }
+    )
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    pct_slug = f"{optimal_reduction_pct * 100:.0f}pct"
+    csv_path = output_path / f"must_reduction_{year}_{duration_h}h_{pct_slug}.csv"
+    df.to_csv(csv_path, index=False)
+    return csv_path

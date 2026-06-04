@@ -226,6 +226,130 @@ def _parse_must_overrides(argv: list[str]) -> dict[str, float]:
     return overrides
 
 
+# Duration (hours) used for the per-year MUST-reduction comparative scenarios.
+MUST_REDUCTION_DURATION_H: int = 4
+
+
+def _compute_must_reduction_scenarios(
+    *,
+    solar,
+    pld_by_year: dict[int, np.ndarray],
+    price_sources_by_year: dict[int, str],
+    params: SimulationParams,
+    gf: float,
+    curtailment_enabled: bool,
+    charge_mode: int,
+    rte_table: dict[int, float],
+    rte_fallback: float,
+) -> tuple[dict[str, tuple], list[dict]]:
+    """Optimize MUST reduction per backtest year for the 4h scenario.
+
+    For each year the optimizer finds the MUST reduction that maximizes the
+    net annual benefit; the 4h scenario is then re-simulated under that optimal
+    MUST cap to produce a full hourly dispatch.
+
+    Parameters
+    ----------
+    solar : SolarProfile
+        Loaded solar profile.
+    pld_by_year : dict[int, np.ndarray]
+        Hourly PLD per backtest year.
+    price_sources_by_year : dict[int, str]
+        PLD source label per year.
+    params : SimulationParams
+        Simulation parameters carrying TUST and sweep configuration.
+    gf : float
+        Garantia física in MW.
+    curtailment_enabled : bool
+        Whether ONS curtailment is applied.
+    charge_mode : int
+        Dispatch charge mode.
+    rte_table : dict[int, float]
+        Per-year round-trip efficiency.
+    rte_fallback : float
+        RTE used when a year is missing from ``rte_table``.
+
+    Returns
+    -------
+    tuple[dict[str, tuple], list[dict]]
+        ``(reduction_by_key, dispatch_records)`` where ``reduction_by_key`` maps
+        a comparative label to a data tuple shaped like ``results_by_key`` and
+        ``dispatch_records`` carries hourly dispatch metadata for CSV export.
+    """
+    from solar_bess_risk.must_optimizer import optimize_must_reduction
+
+    dur = MUST_REDUCTION_DURATION_H
+    _gen_lim = (
+        solar.generation_lim_mw
+        if solar.generation_lim_mw is not None
+        else solar.generation_mw
+    )
+
+    reduction_by_key: dict[str, tuple] = {}
+    dispatch_records: list[dict] = []
+
+    for year in BACKTEST_YEARS:
+        pld = pld_by_year[year]
+        rte_year = rte_table.get(year, rte_fallback)
+        price_source = price_sources_by_year.get(
+            year, f"pld_{params.bq_submarket}_{year}"
+        )
+        price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
+        curt_series = get_curtailment_for_scenario(year, curtailment_enabled, _gen_lim)
+
+        scenario = _get_scenario_for_duration(
+            dur, gf, params.usd_brl_rate, rte=rte_year, charge_mode=charge_mode
+        )
+
+        opt = optimize_must_reduction(
+            solar,
+            price_profile,
+            scenario,
+            params,
+            curtailment_series=curt_series,
+        )
+
+        must_mw = params.mwac * (1.0 - opt.optimal_reduction_pct)
+        dispatch = simulate_scenario(
+            solar,
+            price_profile,
+            scenario,
+            params,
+            curtailment_series=curt_series,
+            must_mw=must_mw,
+        )
+
+        pct_label = f"{opt.optimal_reduction_pct * 100:.0f}%"
+        key = f"{year} - {dur}h redução de MUST ({pct_label})"
+        reduction_by_key[key] = (
+            dispatch,
+            pld,
+            gf,
+            _gen_lim,
+            scenario.peak_hours,
+            dur,
+            year,
+            rte_year,
+            scenario,
+            None,
+            None,
+        )
+        dispatch_records.append(
+            {
+                "key": key,
+                "year": year,
+                "duration_h": dur,
+                "optimal_reduction_pct": opt.optimal_reduction_pct,
+                "must_mw": must_mw,
+                "mwac": params.mwac,
+                "dispatch": dispatch,
+                "pld": pld,
+            }
+        )
+
+    return reduction_by_key, dispatch_records
+
+
 def _compute_must_results(
     *,
     solar,
@@ -305,8 +429,10 @@ def _compute_must_results(
 
 def main() -> None:
     """Run the full analysis pipeline."""
+    from solar_bess_risk.manifest import _current_branch
+    branch = _current_branch()
     print(f"\n{'='*60}")
-    print(f"  Solar BESS Modulation Risk Tool v{__version__}")
+    print(f"  Solar BESS Modulation Risk Tool v{__version__}  [{branch}]")
     print(f"{'='*60}\n")
 
     if "--help" in sys.argv or "-h" in sys.argv:
@@ -440,6 +566,8 @@ def main() -> None:
     print("[4/6] Gerando relatórios...")
 
     must_results: list | None = None
+    must_reduction_by_key: dict[str, tuple] | None = None
+    must_reduction_records: list[dict] = []
     if must_sweep_enabled:
         print("  Otimização de redução de MUST por cenário...")
         must_results = _compute_must_results(
@@ -461,10 +589,42 @@ def main() -> None:
                 f"benefício R$ {r.optimal_net_benefit_brl_per_yr:,.0f}/ano)"
             )
 
+        print("  Cenários comparativos de redução de MUST por ano...")
+        must_reduction_by_key, must_reduction_records = (
+            _compute_must_reduction_scenarios(
+                solar=solar,
+                pld_by_year=pld_by_year,
+                price_sources_by_year=price_sources_by_year,
+                params=params,
+                gf=gf,
+                curtailment_enabled=curtailment_enabled,
+                charge_mode=charge_mode,
+                rte_table=rte_table,
+                rte_fallback=rte_fallback,
+            )
+        )
+
     run_id = generate_run_id()
     project_slug = Path(params.csv_path).stem
     output_dir = Path("output") / project_slug / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Export hourly dispatch (8760h) under the optimal MUST per year.
+    if must_reduction_records:
+        from solar_bess_risk.must_optimizer import write_must_reduction_dispatch_csv
+
+        for rec in must_reduction_records:
+            csv_path = write_must_reduction_dispatch_csv(
+                year=rec["year"],
+                duration_h=rec["duration_h"],
+                optimal_reduction_pct=rec["optimal_reduction_pct"],
+                must_mw=rec["must_mw"],
+                mwac=rec["mwac"],
+                dispatch=rec["dispatch"],
+                pld=rec["pld"],
+                output_dir=output_dir,
+            )
+            print(f"  CSV redução MUST: {csv_path}")
 
     report_path: str | None = None
     if not director_only:
@@ -507,6 +667,7 @@ def main() -> None:
         charge_mode=charge_mode,
         rte_metadata=rte_metadata,
         must_results=must_results,
+        must_reduction_by_key=must_reduction_by_key,
     )
     print(f"  Relatório Diretoria: {consultancy_path}")
 
