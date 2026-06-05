@@ -164,9 +164,12 @@ def test_html_renders_all_metrics(solar_profile, base_pld, base_curt, scenario, 
     build_risk_matrix_html(result, str(path), project_name="TESTE")
     html = path.read_text(encoding="utf-8")
     assert "Modulação s/ BESS" in html
-    assert "Modulação c/ BESS" in html
-    assert "Modulação de Equilíbrio s/ BESS" in html
+    assert "c/ BESS" in html
     assert "Caixa Adicionado Total" in html
     assert "TESTE" in html
-    # 4 metric tables rendered
-    assert html.count("matrix-block") >= 4
+    # combined modulação quadro + caixa adicionado
+    assert html.count("matrix-block") >= 2
+    # binary vivid colouring (no gradient), green/red premium legend
+    assert "#15a34a" in html
+    assert "#e11d48" in html
+    assert "atinge o prêmio anual" in html

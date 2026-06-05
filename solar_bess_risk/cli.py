@@ -257,39 +257,9 @@ def run_session(service_account_path: str | None = None) -> tuple:
         lcoe_hi,
     )
 
-    # 4. Fatores de preenchimento de dados de 2026
-    print()
-    print("  ── Fatores para preenchimento de 2026 ──")
-    print("  (Enter = usar default; 0 = usar valor do campo)")
-    pld_lo, pld_hi = PARAM_BOUNDS["pld_factor_2026"]
-    raw_pld_factor = input(
-        f"  Fator PLD 2026 (multiplica base 2025; Enter = auto via BigQuery): "
-    ).strip()
-    if raw_pld_factor == "":
-        pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
-    else:
-        try:
-            v = float(raw_pld_factor)
-        except ValueError:
-            print(f"  ERRO: valor '{raw_pld_factor}' não é numérico; usando auto.")
-            pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
-        else:
-            if not (pld_lo <= v <= pld_hi):
-                print(f"  ERRO: fator {v} fora de [{pld_lo}, {pld_hi}]; usando auto.")
-                pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
-            else:
-                pld_factor_2026 = v
-
-    curt_lo, curt_hi = PARAM_BOUNDS["curtailment_factor_2026"]
-    curtailment_factor_2026 = _prompt_float(
-        "Fator curtailment 2026 (multiplica perfil previsao_futura)",
-        "fração",
-        DEFAULT_CURTAILMENT_FACTOR_2026,
-        curt_lo,
-        curt_hi,
-    )
-
-    # 5. Dimensionamento do BESS por cobertura diária da GF (opcional)
+    # 4. Dimensionamento do BESS por cobertura diária da GF (opcional)
+    pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
+    curtailment_factor_2026 = DEFAULT_CURTAILMENT_FACTOR_2026
     print()
     print("  ── Dimensionamento do BESS ──")
     gf_daily_coverage_target_pct = _prompt_coverage_target()

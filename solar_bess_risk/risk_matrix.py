@@ -311,40 +311,74 @@ def _fmt_caixa(value: float) -> str:
     return f"+ R$ {value:.0f} MM"
 
 
-def _heat_style(value: float, vmin: float, vmax: float, *, invert: bool = False) -> str:
-    """Light green→red background shading scaled to the metric range."""
-    if vmax - vmin <= 1e-9:
-        ratio = 0.5
-    else:
-        ratio = (value - vmin) / (vmax - vmin)
-    ratio = max(0.0, min(1.0, ratio))
-    if invert:
-        ratio = 1.0 - ratio
-    # ratio 0 -> red-ish, 1 -> green-ish
-    r = int(round(254 - ratio * (254 - 209)))
-    g = int(round(226 + ratio * (250 - 226)))
-    b = int(round(226 + ratio * (229 - 226)))
-    return f"background-color: rgb({r},{g},{b});"
+def _vivid_style(is_good: bool) -> str:
+    """Binary vivid colour (no gradient).
+
+    Green when the BESS reaches the annual premium for that scenario, red when it
+    does not. White text for contrast on the saturated background.
+    """
+    if is_good:
+        return "background-color:#15a34a; color:#fff;"
+    return "background-color:#e11d48; color:#fff;"
+
+
+def _cell_reaches_premium(cell: "RiskMatrixCell", premio_mm: float) -> bool:
+    """The BESS is 'good' (green) when the cash it adds covers the annual premium."""
+    caixa = cell.caixa_adicionado_mm
+    if caixa is None or not np.isfinite(caixa):
+        return False
+    return caixa >= premio_mm
+
+
+def _modulation_table(result: RiskMatrixResult, premio_mm: float) -> str:
+    """Combined quadro: modulação s/ BESS and c/ BESS in the same cell.
+
+    Coloured with the binary green/red premium criterion.
+    """
+    col_headers = "".join(
+        f"<th>{t:.0f}% curtailment</th>" for t in result.curtailment_targets_pct
+    )
+    body_rows = []
+    for pld_factor, row in zip(result.pld_factors, result.cells):
+        cells_html = []
+        for cell in row:
+            style = _vivid_style(_cell_reaches_premium(cell, premio_mm))
+            sem = _fmt_mod(cell.mod_sem_bess)
+            com = _fmt_mod(cell.mod_com_bess)
+            cells_html.append(
+                f'<td style="{style}"><div class="mod-pair">'
+                f'<span class="mod-row"><b>s/ BESS</b> {sem}</span>'
+                f'<span class="mod-row"><b>c/ BESS</b> {com}</span>'
+                f"</div></td>"
+            )
+        label = f"PLD ×{pld_factor:.2f}"
+        if abs(pld_factor - 1.0) < 1e-9:
+            label += " (2025)"
+        body_rows.append(
+            f'<tr><th class="row-head">{label}</th>{"".join(cells_html)}</tr>'
+        )
+    return f"""
+    <div class="matrix-block">
+        <h2>Modulação s/ BESS &amp; c/ BESS (R$/MWh)</h2>
+        <table>
+            <thead><tr><th class="corner">PLD \\ Curtailment</th>{col_headers}</tr></thead>
+            <tbody>{"".join(body_rows)}</tbody>
+        </table>
+    </div>"""
 
 
 def _metric_table(
     result: RiskMatrixResult,
+    premio_mm: float,
     *,
     title: str,
     extractor,
     formatter,
-    invert_heat: bool = False,
 ) -> str:
-    """Render one metric as a PLD (rows) × curtailment (cols) heat table."""
-    values = [
-        extractor(cell)
-        for row in result.cells
-        for cell in row
-        if extractor(cell) is not None and np.isfinite(extractor(cell))
-    ]
-    vmin = min(values) if values else 0.0
-    vmax = max(values) if values else 0.0
+    """Render one metric as a PLD (rows) × curtailment (cols) table.
 
+    Cells use the binary green/red premium criterion (no colour gradient).
+    """
     col_headers = "".join(
         f"<th>{t:.0f}% curtailment</th>" for t in result.curtailment_targets_pct
     )
@@ -353,10 +387,10 @@ def _metric_table(
         cells_html = []
         for cell in row:
             raw = extractor(cell)
+            style = _vivid_style(_cell_reaches_premium(cell, premio_mm))
             if raw is None or not np.isfinite(raw):
-                cells_html.append('<td class="na">n/a</td>')
+                cells_html.append(f'<td style="{style}">n/a</td>')
             else:
-                style = _heat_style(float(raw), vmin, vmax, invert=invert_heat)
                 cells_html.append(f'<td style="{style}">{formatter(raw)}</td>')
         label = f"PLD ×{pld_factor:.2f}"
         if abs(pld_factor - 1.0) < 1e-9:
@@ -386,33 +420,13 @@ def build_risk_matrix_html(
 
     tables = "".join(
         [
+            _modulation_table(result, premio_mm),
             _metric_table(
                 result,
-                title="Modulação s/ BESS (R$/MWh)",
-                extractor=lambda c: c.mod_sem_bess,
-                formatter=lambda v: _fmt_mod(v),
-                invert_heat=True,
-            ),
-            _metric_table(
-                result,
-                title="Modulação c/ BESS (R$/MWh)",
-                extractor=lambda c: c.mod_com_bess,
-                formatter=lambda v: _fmt_mod(v),
-                invert_heat=True,
-            ),
-            _metric_table(
-                result,
-                title="Modulação de Equilíbrio s/ BESS (R$/MWh)",
-                extractor=lambda c: c.mod_equilibrio,
-                formatter=lambda v: _fmt_mod(v),
-                invert_heat=True,
-            ),
-            _metric_table(
-                result,
+                premio_mm,
                 title="Caixa Adicionado Total (R$ MM/ano)",
                 extractor=lambda c: c.caixa_adicionado_mm,
                 formatter=lambda v: _fmt_caixa(v),
-                invert_heat=False,
             ),
         ]
     )
@@ -442,7 +456,11 @@ th {{ background:#1e293b; color:#fff; padding:.8rem; font-size:.8rem; text-trans
 th.corner {{ background:#0f172a; }}
 td, th.row-head {{ padding:.9rem .6rem; border:1px solid var(--border); font-size:1rem; font-weight:700; }}
 th.row-head {{ background:var(--bg); color:var(--navy); text-align:left; white-space:nowrap; }}
-td.na {{ color:var(--muted); font-weight:400; background:#f1f5f9; }}
+.mod-pair {{ display:flex; flex-direction:column; gap:.2rem; line-height:1.25; }}
+.mod-pair .mod-row {{ font-size:.95rem; white-space:nowrap; }}
+.mod-pair .mod-row b {{ font-weight:800; opacity:.85; font-size:.66rem; text-transform:uppercase; letter-spacing:.3px; margin-right:.35rem; }}
+.legend {{ display:flex; gap:1.5rem; align-items:center; margin:0 0 1.5rem; font-weight:700; font-size:.85rem; color:var(--navy); flex-wrap:wrap; }}
+.legend .swatch {{ display:inline-block; width:1rem; height:1rem; border-radius:3px; vertical-align:middle; margin-right:.45rem; }}
 .note {{ font-size:.85rem; color:var(--muted); font-weight:600; margin-top:1rem; }}
 </style>
 </head>
@@ -458,13 +476,16 @@ td.na {{ color:var(--muted); font-weight:400; background:#f1f5f9; }}
     <div class="item"><div class="lbl">Fatores PLD</div><div class="val">{", ".join(f"{f:.2f}" for f in result.pld_factors)}</div></div>
     <div class="item"><div class="lbl">Alvos Curtailment</div><div class="val">{", ".join(f"{t:.0f}%" for t in result.curtailment_targets_pct)}</div></div>
   </div>
+  <div class="legend">
+    <span><span class="swatch" style="background:#15a34a"></span>BESS atinge o prêmio anual (Caixa Adicionado ≥ Prêmio)</span>
+    <span><span class="swatch" style="background:#e11d48"></span>BESS não atinge o prêmio anual</span>
+  </div>
   {tables}
   <p class="note">
     Eixo PLD: multiplicador aplicado ao PLD base de 2025. Eixo Curtailment:
     curtailment ONS de 2025 (base {result.base_curtailment_pct:.1f}%) escalado para atingir o
     percentual-alvo de curtailment ONS/geração. O clipping de inversor recuperado
-    pelo BESS não é escalado (entra fixo no despacho). Modulação de Equilíbrio s/ BESS:
-    fator linear no PLD dos dias de descarga até o Caixa Adicionado igualar o Prêmio Anual.
+    pelo BESS não é escalado (entra fixo no despacho).
   </p>
 </div>
 </body>
