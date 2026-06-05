@@ -105,11 +105,17 @@ def test_curtailment_factor_scales_to_targets(solar_profile, base_pld, base_curt
         params=params,
         bq_submarket="SE",
     )
+    # The curtailment axis scales the ONS base (~base_curtailment_pct) up to each
+    # nominal target: factor = target / base_ons_pct.
     base_pct = result.base_curtailment_pct
     for row in result.cells:
         for cell in row:
             expected_factor = cell.curtailment_target_pct / base_pct
             assert cell.curtailment_factor == pytest.approx(expected_factor, rel=1e-9)
+            # Realized ONS curtailment % matches the nominal target.
+            assert cell.realized_curtailment_pct == pytest.approx(
+                cell.curtailment_target_pct, rel=1e-3
+            )
 
 
 def test_pld_factor_scales_modulation(solar_profile, base_pld, base_curt, scenario, params):

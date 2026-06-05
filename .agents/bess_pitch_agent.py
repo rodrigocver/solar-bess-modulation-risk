@@ -68,7 +68,7 @@ def extrair_kpis_do_relatorio(caminho_html):
         linhas = tab.find('tbody').find_all('tr')
         for linha in linhas:
             colunas = linha.find_all('td')
-            if not colunas or len(colunas) < 17:
+            if not colunas or len(colunas) < 18:
                 continue
             
             cenario_nome = colunas[0].text.strip()
@@ -90,17 +90,21 @@ def extrair_kpis_do_relatorio(caminho_html):
                 economia_must = limpar_numero(colunas[10].text)
                 caixa_adicionado = saldo_liquido + economia_must
                 
-                curt_ger = str(int(round(limpar_numero(colunas[13].text)))) + "%" if colunas[13].text.strip() != "—" else "0%"
-                curt_rec = str(int(round(limpar_numero(colunas[15].text)))) + "%" if colunas[15].text.strip() != "—" else "0%"
+                # KPI table columns: 13 = Curtailment ONS / Geração,
+                # 14 = Clipping / Geração, 16 = Curtailment Recuperado, 17 = Δ CVaR.
+                curt_ons = str(int(round(limpar_numero(colunas[13].text)))) + "%" if colunas[13].text.strip() != "—" else "0%"
+                curt_clip = str(int(round(limpar_numero(colunas[14].text)))) + "%" if colunas[14].text.strip() != "—" else "0%"
+                curt_rec = str(int(round(limpar_numero(colunas[16].text)))) + "%" if colunas[16].text.strip() != "—" else "0%"
 
                 dados[chave] = {
                     'nome': cenario_nome,
                     'mod_original_inteira': int(round(mod_original)),
                     'mod_com_bess_inteira': int(round(mod_com_bess)),
                     'caixa_adicionado_mm': caixa_adicionado,
-                    'curtailment_geracao': curt_ger,
+                    'curtailment_ons': curt_ons,
+                    'curtailment_clip': curt_clip,
                     'curtailment_recuperado': curt_rec,
-                    'delta_cvar_dia_mil': limpar_numero(colunas[16].text)
+                    'delta_cvar_dia_mil': limpar_numero(colunas[17].text)
                 }
 
     return dados
@@ -255,6 +259,12 @@ def _scenario_metrics_from_result_data(label, data):
     gen_total = float(np.sum(gen_arr))
     curt_pct = (curt_total / gen_total * 100.0) if gen_total > 0 else 0.0
     curt_recovered_pct = (curt_recovered / curt_total * 100.0) if curt_total > 0 else 0.0
+    # Split total curtailment into external-grid (ONS) and inverter-clipping
+    # (recovered by the BESS) components.
+    ons_total = float(np.sum(np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)))
+    clip_total = max(0.0, curt_total - ons_total)
+    curt_ons_pct = (ons_total / gen_total * 100.0) if gen_total > 0 else 0.0
+    curt_clip_pct = (clip_total / gen_total * 100.0) if gen_total > 0 else 0.0
 
     cvar_delta_mil = 0.0
     if risk_metrics:
@@ -271,6 +281,8 @@ def _scenario_metrics_from_result_data(label, data):
         'mod_com_bess_inteira': int(round(mod_com_bess)) if mod_com_bess is not None else 0,
         'caixa_adicionado_mm': caixa_adicionado,
         'curtailment_geracao': str(int(round(curt_pct))) + "%",
+        'curtailment_ons': str(int(round(curt_ons_pct))) + "%",
+        'curtailment_clip': str(int(round(curt_clip_pct))) + "%",
         'curtailment_recuperado': str(int(round(curt_recovered_pct))) + "%",
         'delta_cvar_dia_mil': cvar_delta_mil,
     }
@@ -376,7 +388,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-mod-orig">R$ {int(round(cenario.get('mod_original_inteira', 0)))}/MWh</td>
                     <td class="val-mod-bess">R$ {int(round(cenario.get('mod_com_bess_inteira', 0)))}/MWh</td>
                     <td class="val-mod-eq">{_format_mod_equilibrio_value(cenario)}<div class="val-factor">{_format_fator_equilibrio_value(cenario)}</div></td>
-                    <td>{cenario.get('curtailment_geracao', '0%')}</td>
+                    <td>{cenario.get('curtailment_ons', '0%')}</td>
+                    <td>{cenario.get('curtailment_clip', '0%')}</td>
                     <td>{cenario.get('curtailment_recuperado', '0%')}</td>
                     <td class="val-caixa">+ R$ {cenario.get('caixa_adicionado_mm', 0.0):.0f} MM</td>
                     <td class="val-cvar">R$ {cenario.get('delta_cvar_dia_mil', 0.0):.0f} mil / dia</td>
@@ -412,7 +425,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <th>Modulação s/ BESS</th>
                     <th>Modulação c/ BESS</th>
                     <th>Modulação de Equilíbrio s/ BESS</th>
-                    <th>Curtailment / Geração</th>
+                    <th>Curtailment ONS / Geração</th>
+                    <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
                     <th>Caixa Adicionado Total</th>
                     <th>Redução CVaR 95%</th>
@@ -569,7 +583,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <th>Modulação s/ BESS</th>
                     <th>Modulação c/ BESS</th>
                     <th>Modulação de Equilíbrio s/ BESS</th>
-                    <th>Curtailment / Geração</th>
+                    <th>Curtailment ONS / Geração</th>
+                    <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
                     <th>Caixa Adicionado Total</th>
                     <th>Redução CVaR 95%</th>
@@ -585,7 +600,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-mod-orig">R$ {get_int('2025_base', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2025_base', 'mod_com_bess_inteira')}/MWh</td>
                     <td class="val-mod-eq">{get_mod_equilibrio('2025_base')}<div class="val-factor">{get_fator_equilibrio('2025_base')}</div></td>
-                    <td>{get_text('2025_base', 'curtailment_geracao')}</td>
+                    <td>{get_text('2025_base', 'curtailment_ons')}</td>
+                    <td>{get_text('2025_base', 'curtailment_clip')}</td>
                     <td>{get_text('2025_base', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2025_base', 'caixa_adicionado_mm'):.0f} MM</td>
                     <td class="val-cvar">R$ {get_val('2025_base', 'delta_cvar_dia_mil'):.0f} mil / dia</td>
@@ -599,7 +615,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-mod-orig">R$ {get_int('2026_base', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2026_base', 'mod_com_bess_inteira')}/MWh</td>
                     <td class="val-mod-eq">{get_mod_equilibrio('2026_base')}<div class="val-factor">{get_fator_equilibrio('2026_base')}</div></td>
-                    <td>{get_text('2026_base', 'curtailment_geracao')}</td>
+                    <td>{get_text('2026_base', 'curtailment_ons')}</td>
+                    <td>{get_text('2026_base', 'curtailment_clip')}</td>
                     <td>{get_text('2026_base', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2026_base', 'caixa_adicionado_mm'):.0f} MM</td>
                     <td class="val-cvar">R$ {get_val('2026_base', 'delta_cvar_dia_mil'):.0f} mil / dia</td>
@@ -621,7 +638,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <th>Modulação s/ BESS</th>
                     <th>Modulação c/ BESS</th>
                     <th>Modulação de Equilíbrio s/ BESS</th>
-                    <th>Curtailment / Geração</th>
+                    <th>Curtailment ONS / Geração</th>
+                    <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
                     <th>Caixa Adicionado Total*</th>
                     <th>Redução CVaR 95%</th>
@@ -637,7 +655,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-mod-orig">R$ {get_int('2025_must', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2025_must', 'mod_com_bess_inteira')}/MWh</td>
                     <td class="val-mod-eq">{get_mod_equilibrio('2025_must')}<div class="val-factor">{get_fator_equilibrio('2025_must')}</div></td>
-                    <td>{get_text('2025_must', 'curtailment_geracao')}</td>
+                    <td>{get_text('2025_must', 'curtailment_ons')}</td>
+                    <td>{get_text('2025_must', 'curtailment_clip')}</td>
                     <td>{get_text('2025_must', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2025_must', 'caixa_adicionado_mm'):.0f} MM</td>
                     <td class="val-cvar">R$ {get_val('2025_must', 'delta_cvar_dia_mil'):.0f} mil / dia</td>
@@ -651,7 +670,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-mod-orig">R$ {get_int('2026_must', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2026_must', 'mod_com_bess_inteira')}/MWh</td>
                     <td class="val-mod-eq">{get_mod_equilibrio('2026_must')}<div class="val-factor">{get_fator_equilibrio('2026_must')}</div></td>
-                    <td>{get_text('2026_must', 'curtailment_geracao')}</td>
+                    <td>{get_text('2026_must', 'curtailment_ons')}</td>
+                    <td>{get_text('2026_must', 'curtailment_clip')}</td>
                     <td>{get_text('2026_must', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2026_must', 'caixa_adicionado_mm'):.0f} MM</td>
                     <td class="val-cvar">R$ {get_val('2026_must', 'delta_cvar_dia_mil'):.0f} mil / dia</td>

@@ -594,6 +594,12 @@ def _build_kpi_table(
         curtailment_pct = (curt_total / gen_total * 100) if gen_total > 0 else 0
         must_cut_pct = (must_cut_total / gen_total * 100) if gen_total > 0 else 0
         curt_recovered_pct = (curt_recovered / total_available * 100) if total_available > 0 else 0
+        # Split the technical curtailment into its external-grid (ONS) and
+        # inverter-clipping (recovered by the BESS) components for the board.
+        ons_total = float(np.sum(np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)))
+        clip_total = max(0.0, curt_total - ons_total)
+        curtailment_ons_pct = (ons_total / gen_total * 100) if gen_total > 0 else 0
+        clipping_pct = (clip_total / gen_total * 100) if gen_total > 0 else 0
 
         missed_charge = float(dispatch.carga_nao_realizada_diaria_mwh.sum())
 
@@ -622,7 +628,8 @@ def _build_kpi_table(
             <td>{tust_savings_str}</td>
             <td>{delta_saldo_pct:,.1f}%</td>
             <td>{coverage:.1f}%</td>
-            <td>{curtailment_pct:.1f}%</td>
+            <td>{curtailment_ons_pct:.1f}%</td>
+            <td>{clipping_pct:.1f}%</td>
             <td>{must_cut_pct:.1f}%</td>
             <td>{curt_recovered_pct:.1f}%</td>
             <td>{cvar_delta_str}</td>
@@ -646,7 +653,8 @@ def _build_kpi_table(
         <th title="Economia anual de TUST pela redução de MUST contratada. Presente apenas no cenário de otimização de MUST.">Economia MUST Anual (R$ MM/ano)</th>
         <th title="Δ Saldo Líquido dividido pelo módulo do saldo líquido sem BESS.">Δ Saldo Líquido (%)</th>
         <th>Cobertura GF</th>
-        <th title="Curtailment técnico (ONS + clipping de inversor liberado pelo BESS) sobre a geração. Não inclui o corte por redução de MUST.">Curtailment / Geração</th>
+        <th title="Curtailment externo do ONS (corte de rede) sobre a geração. Não inclui o clipping de inversor nem o corte por redução de MUST.">Curtailment ONS / Geração</th>
+        <th title="Clipping de inversor liberado/recuperado pelo BESS sobre a geração. Componente técnico separado do corte do ONS.">Clipping / Geração</th>
         <th title="Energia cortada para respeitar o MUST contratado (reduzido). É uma decisão de política comercial para capturar economia de TUST, não uma perda técnica.">Corte MUST / Geração</th>
         <th>Curtailment Recuperado</th>
         <th>Δ CVaR 95% (R$ mil/dia)</th>

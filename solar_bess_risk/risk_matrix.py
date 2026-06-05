@@ -144,14 +144,17 @@ class RiskMatrixResult:
     cells: tuple[tuple[RiskMatrixCell, ...], ...]  # indexed [pld_idx][curt_idx]
 
 
-def _base_curtailment_pct(curtailment_pct_profile: np.ndarray, gen_lim: np.ndarray) -> float:
-    """Generation-weighted average curtailment fraction of the base profile (%)."""
-    gen = np.asarray(gen_lim, dtype=np.float64)
-    total_gen = float(np.sum(gen))
-    if total_gen <= 0:
+def _ons_curt_pct(ons_mw: np.ndarray, sum_gen_lim: float) -> float:
+    """ONS curtailment as a % of generation (external grid curtailment only).
+
+    This is the *ONS-only* metric (~11.1% for the base 2025 profile), excluding
+    the inverter-clipping component (``gen_bess - gen_lim``) that the BESS
+    recovers. The risk matrix anchors its curtailment axis on this ONS figure
+    and scales it up to the 15/20/25/30 % stress scenarios.
+    """
+    if sum_gen_lim <= 0:
         return 0.0
-    curt_mwh = float(np.sum(np.asarray(curtailment_pct_profile, dtype=np.float64) * gen))
-    return 100.0 * curt_mwh / total_gen
+    return 100.0 * float(np.sum(ons_mw)) / sum_gen_lim
 
 
 def compute_risk_matrix(
@@ -193,16 +196,31 @@ def compute_risk_matrix(
     RiskMatrixResult
         Computed grid plus axis metadata.
     """
-    gen_lim, _gen_bess = solar.get_year_arrays(1)
+    gen_lim, gen_bess = solar.get_year_arrays(1)
     gen_lim = np.asarray(gen_lim, dtype=np.float64)
+    gen_bess = np.asarray(gen_bess, dtype=np.float64)
     gf = float(solar.garantia_fisica_mw)
     gf_energy = gf * len(base_pld)
     premium_brl = annual_insurance_premium_brl(scenario, params)
 
-    if base_curtailment_pct_profile is not None:
-        base_curt_pct = _base_curtailment_pct(base_curtailment_pct_profile, gen_lim)
+    sum_gen_lim = float(np.sum(gen_lim))
+
+    if base_curtailment_pct_profile is not None and sum_gen_lim > 0:
+        ons_base_mw = np.asarray(base_curtailment_pct_profile, dtype=np.float64) * gen_lim
+        # Base curtailment % = ONS-only figure (~11.1%), excluding inverter
+        # clipping. The axis scenarios (15/20/25/30 %) scale this ONS curtailment.
+        base_curt_pct = _ons_curt_pct(ons_base_mw, sum_gen_lim)
     else:
+        ons_base_mw = None
         base_curt_pct = 0.0
+
+    # Scale the ONS curtailment from its base (~11.1%) up to each target column.
+    curt_factors: list[float] = []
+    for target_pct in curtailment_targets_pct:
+        if ons_base_mw is None or base_curt_pct <= 1e-9:
+            curt_factors.append(0.0)
+        else:
+            curt_factors.append(float(target_pct) / base_curt_pct)
 
     rows: list[tuple[RiskMatrixCell, ...]] = []
     for pld_factor in pld_factors:
@@ -214,17 +232,13 @@ def compute_risk_matrix(
             base_year,
         )
         row_cells: list[RiskMatrixCell] = []
-        for target_pct in curtailment_targets_pct:
-            if base_curtailment_pct_profile is None or base_curt_pct <= 1e-9:
-                curt_factor = 0.0
+        for target_pct, curt_factor in zip(curtailment_targets_pct, curt_factors):
+            if ons_base_mw is None or base_curt_pct <= 1e-9:
                 curt_series = None
             else:
-                curt_factor = float(target_pct) / base_curt_pct
-                curt_series = (
-                    np.asarray(base_curtailment_pct_profile, dtype=np.float64)
-                    * curt_factor
-                    * gen_lim
-                )
+                # Scaled ONS curtailment (MW); the dispatch still adds the fixed
+                # inverter clipping internally via min(gen_bess, ons + clip).
+                curt_series = curt_factor * ons_base_mw
 
             dispatch = simulate_scenario(
                 solar,
@@ -251,9 +265,13 @@ def compute_risk_matrix(
                 premium_brl=premium_brl,
             )
 
-            gen_total = float(np.sum(gen_lim))
-            ons_curt_total = float(np.sum(np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)))
-            realized_pct = 100.0 * ons_curt_total / gen_total if gen_total > 0 else 0.0
+            # Realized ONS curtailment % (scaled base, excludes inverter clipping).
+            if ons_base_mw is None:
+                realized_pct = 0.0
+            else:
+                realized_pct = _ons_curt_pct(
+                    np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64), sum_gen_lim
+                )
 
             row_cells.append(
                 RiskMatrixCell(
@@ -436,16 +454,17 @@ td.na {{ color:var(--muted); font-weight:400; background:#f1f5f9; }}
   </div>
   <div class="summary">
     <div class="item"><div class="lbl">Prêmio Anual</div><div class="val">R$ {premio_mm:.0f} MM / ano</div></div>
-    <div class="item"><div class="lbl">Curtailment base 2025</div><div class="val">{result.base_curtailment_pct:.1f}%</div></div>
+    <div class="item"><div class="lbl">Curtailment ONS base 2025</div><div class="val">{result.base_curtailment_pct:.1f}%</div></div>
     <div class="item"><div class="lbl">Fatores PLD</div><div class="val">{", ".join(f"{f:.2f}" for f in result.pld_factors)}</div></div>
     <div class="item"><div class="lbl">Alvos Curtailment</div><div class="val">{", ".join(f"{t:.0f}%" for t in result.curtailment_targets_pct)}</div></div>
   </div>
   {tables}
   <p class="note">
-    Eixo PLD: multiplicador aplicado ao PLD base de 2025. Eixo Curtailment: perfil
-    de curtailment de 2025 escalado para atingir o percentual-alvo de
-    curtailment/geração. Modulação de Equilíbrio s/ BESS: fator linear no PLD dos
-    dias de descarga até o Caixa Adicionado igualar o Prêmio Anual.
+    Eixo PLD: multiplicador aplicado ao PLD base de 2025. Eixo Curtailment:
+    curtailment ONS de 2025 (base {result.base_curtailment_pct:.1f}%) escalado para atingir o
+    percentual-alvo de curtailment ONS/geração. O clipping de inversor recuperado
+    pelo BESS não é escalado (entra fixo no despacho). Modulação de Equilíbrio s/ BESS:
+    fator linear no PLD dos dias de descarga até o Caixa Adicionado igualar o Prêmio Anual.
   </p>
 </div>
 </body>
