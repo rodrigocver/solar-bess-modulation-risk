@@ -94,6 +94,24 @@ DEFAULT_CURTAILMENT_FACTOR_2026: float = 1.0
 CURTAILMENT_ASSUMPTION_PCT_2026: float = 9.2
 
 # ---------------------------------------------------------------------------
+# Risk matrix (PLD × curtailment sensitivity grid)
+# ---------------------------------------------------------------------------
+
+# Additive sensitivity feature: expands the 2025 base scenario across a grid of
+# PLD multipliers and curtailment targets. Does NOT alter the existing 2025/2026
+# scenarios — it is a standalone report (output/.../matriz_risco.html).
+
+# PLD multipliers applied to the 2025 base PLD profile (1.0 = 2025 as-is).
+RISK_MATRIX_PLD_FACTORS: tuple[float, ...] = (1.0, 1.25, 1.5, 1.75, 2.0)
+
+# Target annual curtailment/generation percentages. The 2025 base curtailment
+# profile is scaled so each column reaches its target (first ≈ current 2025).
+RISK_MATRIX_CURTAILMENT_TARGETS_PCT: tuple[float, ...] = (15.0, 20.0, 25.0, 30.0)
+
+# Duration (hours) of the BESS scenario used by the risk matrix.
+RISK_MATRIX_DURATION_H: int = 4
+
+# ---------------------------------------------------------------------------
 # CAPEX fixo por duração (spec v2.0 — não é mais parâmetro do usuário)
 # ---------------------------------------------------------------------------
 

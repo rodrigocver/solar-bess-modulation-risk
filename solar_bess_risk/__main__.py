@@ -889,6 +889,57 @@ def main() -> None:
         print(f"  [Aviso Agente BESS] Não foi possível rodar o dashboard automático: {e}")
     # =========================================================================
 
+    # =========================================================================
+    # MATRIZ DE RISCO: sensibilidade PLD × curtailment (cenário base, sem MUST)
+    # =========================================================================
+    try:
+        from solar_bess_risk.config import (
+            CURTAILMENT_SHEET_2025,
+            DEFAULT_CURTAILMENT_PATH,
+            RISK_MATRIX_DURATION_H,
+        )
+        from solar_bess_risk.curtailment import load_curtailment_profile
+        from solar_bess_risk.risk_matrix import (
+            build_risk_matrix_html,
+            compute_risk_matrix,
+        )
+
+        base_pld = pld_by_year.get(2025)
+        if base_pld is None:
+            print("  [Matriz de Risco] PLD base 2025 indisponível; matriz pulada.")
+        else:
+            print("  [Matriz de Risco] Calculando grid PLD × curtailment...")
+            base_curt_profile = None
+            if curtailment_enabled:
+                base_curt_profile = load_curtailment_profile(
+                    DEFAULT_CURTAILMENT_PATH, CURTAILMENT_SHEET_2025
+                )
+            matrix_scenario = _get_scenario_for_duration(
+                RISK_MATRIX_DURATION_H,
+                gf,
+                params.usd_brl_rate,
+                rte=rte_table.get(2025, rte_fallback),
+                charge_mode=charge_mode,
+                coverage_target_pct=params.gf_daily_coverage_target_pct,
+            )
+            matrix_result = compute_risk_matrix(
+                solar=solar,
+                base_pld=base_pld,
+                base_curtailment_pct_profile=base_curt_profile,
+                scenario=matrix_scenario,
+                params=params,
+                bq_submarket=params.bq_submarket,
+            )
+            matrix_path = build_risk_matrix_html(
+                matrix_result,
+                str(output_dir / "matriz_risco.html"),
+                project_name=project_slug.replace("solar_", "").upper(),
+            )
+            print(f"  [Matriz de Risco] HTML gerado: {matrix_path}")
+    except Exception as e:
+        print(f"  [Aviso Matriz de Risco] Não foi possível gerar a matriz: {e}")
+    # =========================================================================
+
     # 6. Write manifest
     print("[5/6] Salvando manifest...")
     manifest = _build_run_manifest(
