@@ -233,6 +233,64 @@ def _equilibrium_for_result_data(data, premium_brl):
         'caixa_equilibrio_mm': cash_equilibrium_brl / 1e6,
     }
 
+def _scenario_metrics_from_result_data(label, data):
+    dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
+    risk_metrics = data[10] if len(data) > 10 and isinstance(data[10], dict) else None
+
+    pld_arr = np.asarray(pld, dtype=np.float64)
+    gen_arr = np.asarray(gen, dtype=np.float64)
+    injection_sem = gen_arr - np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)
+    injection_com = np.asarray(dispatch.grid_injection_mwh, dtype=np.float64)
+
+    gf_energy = float(gf) * len(pld_arr)
+    mod_original = _modulation_value_brl_per_mwh(injection_sem, pld_arr, gf_energy)
+    mod_com_bess = _modulation_value_brl_per_mwh(injection_com, pld_arr, gf_energy)
+    net_sem = float(np.sum((injection_sem - float(gf)) * pld_arr))
+    net_com = float(np.sum((injection_com - float(gf)) * pld_arr))
+    caixa_adicionado = (net_com - net_sem) / 1e6
+
+    curt_total = float(np.sum(dispatch.curtailment_mwh))
+    curt_lost = float(np.sum(dispatch.curtailment_lost_mwh))
+    curt_recovered = max(0.0, curt_total - curt_lost)
+    gen_total = float(np.sum(gen_arr))
+    curt_pct = (curt_total / gen_total * 100.0) if gen_total > 0 else 0.0
+    curt_recovered_pct = (curt_recovered / curt_total * 100.0) if curt_total > 0 else 0.0
+
+    cvar_delta_mil = 0.0
+    if risk_metrics:
+        cvar_sem = risk_metrics.get("cvar_95_sem_bess_brl")
+        cvar_com = risk_metrics.get("cvar_95_com_bess_brl")
+        if cvar_sem is not None and cvar_com is not None:
+            cvar_delta_mil = (cvar_com - cvar_sem) / 1e3
+
+    return {
+        'nome': label,
+        'titulo': label,
+        'descricao': 'Sem redução de MUST',
+        'mod_original_inteira': int(round(mod_original)) if mod_original is not None else 0,
+        'mod_com_bess_inteira': int(round(mod_com_bess)) if mod_com_bess is not None else 0,
+        'caixa_adicionado_mm': caixa_adicionado,
+        'curtailment_geracao': str(int(round(curt_pct))) + "%",
+        'curtailment_recuperado': str(int(round(curt_recovered_pct))) + "%",
+        'delta_cvar_dia_mil': cvar_delta_mil,
+    }
+
+def adicionar_cenarios_curtailment_cruzado(dados, results_by_key):
+    """Adiciona cenários sem MUST com PLD de um ano e curtailment do outro."""
+    premium_brl = dados.get('premio_anual_seguro_mm', 0.0) * 1e6
+    cenarios = []
+
+    for label, data in (results_by_key or {}).items():
+        scenario_data = _scenario_metrics_from_result_data(label, data)
+        if premium_brl > 0:
+            equilibrium = _equilibrium_for_result_data(data, premium_brl)
+            if equilibrium:
+                scenario_data.update(equilibrium)
+        cenarios.append(scenario_data)
+
+    dados['curtailment_cruzado'] = cenarios
+    return dados
+
 def adicionar_modulacao_equilibrio(dados, results_by_key, must_reduction_by_key=None):
     """Adiciona a modulação que faz o caixa anual igualar o prêmio.
 
@@ -304,6 +362,71 @@ def gerar_html_apresentacao(dados, caminho_saida):
         if value is None:
             return "PLD dias c/ descarga n/a"
         return f"PLD dias c/ descarga × {value:.2f}"
+
+    def format_scenario_row(cenario, badge_class):
+        nome = cenario.get('nome', '-')
+        titulo = cenario.get('titulo', nome)
+        descricao = cenario.get('descricao', '')
+        return f"""<tr>
+                    <td class="col-scenario">
+                        <span class="badge-ano {badge_class}">{titulo}</span><br>
+                        <span class="desc-cenario">{descricao}</span>
+                    </td>
+                    <td class="val-premium">R$ {premio:.0f} MM / ano</td>
+                    <td class="val-mod-orig">R$ {int(round(cenario.get('mod_original_inteira', 0)))}/MWh</td>
+                    <td class="val-mod-bess">R$ {int(round(cenario.get('mod_com_bess_inteira', 0)))}/MWh</td>
+                    <td class="val-mod-eq">{_format_mod_equilibrio_value(cenario)}<div class="val-factor">{_format_fator_equilibrio_value(cenario)}</div></td>
+                    <td>{cenario.get('curtailment_geracao', '0%')}</td>
+                    <td>{cenario.get('curtailment_recuperado', '0%')}</td>
+                    <td class="val-caixa">+ R$ {cenario.get('caixa_adicionado_mm', 0.0):.0f} MM</td>
+                    <td class="val-cvar">R$ {cenario.get('delta_cvar_dia_mil', 0.0):.0f} mil / dia</td>
+                </tr>"""
+
+    def _format_mod_equilibrio_value(cenario):
+        value = cenario.get('mod_equilibrio_brl_mwh')
+        if value is None:
+            return "n/a"
+        return f"R$ {value:.0f}/MWh"
+
+    def _format_fator_equilibrio_value(cenario):
+        value = cenario.get('fator_pld_descarga_equilibrio')
+        if value is None:
+            return "PLD dias c/ descarga n/a"
+        return f"PLD dias c/ descarga × {value:.2f}"
+
+    cruzados = dados.get('curtailment_cruzado', [])
+    cruzados_rows = []
+    for idx, cenario in enumerate(cruzados):
+        badge_class = 'badge-2025' if idx == 0 else 'badge-2026'
+        cruzados_rows.append(format_scenario_row(cenario, badge_class))
+    cruzados_section = ""
+    if cruzados_rows:
+        cruzados_section = f"""
+    <div class="section-title"><span>4</span> Sensibilidade Cruzada de Curtailment (Sem Redução de MUST)</div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 20%; text-align: left;">Cenário Cruzado</th>
+                    <th>Prêmio Pago</th>
+                    <th>Modulação s/ BESS</th>
+                    <th>Modulação c/ BESS</th>
+                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>Curtailment / Geração</th>
+                    <th>Curtailment Recuperado</th>
+                    <th>Caixa Adicionado Total</th>
+                    <th>Redução CVaR 95%</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(cruzados_rows)}
+            </tbody>
+        </table>
+        <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
+            Cenários cruzados mantêm o PLD e o despacho sem redução de MUST do ano indicado, trocando apenas a série de curtailment técnico usada na simulação.
+        </p>
+    </div>
+"""
 
     html_content = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -539,6 +662,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
             *O Caixa Adicionado Total nos cenários otimizados consolida o ganho operacional (Δ Saldo Líquido) somado à Economia Anual de TUST gerada pela redução do MUST contratado.
         </p>
     </div>
+
+{cruzados_section}
 
 </div>
 

@@ -13,9 +13,15 @@ sys.path.append(str(AGENTS_DIR))
 import bess_pitch_agent  # noqa: E402
 
 
-def _dispatch(*, injection_com, discharge):
+def _dispatch(*, injection_com, discharge, curtailment=None, curtailment_lost=None):
     arr = np.asarray(injection_com, dtype=np.float64)
     zeros = np.zeros_like(arr)
+    curt = zeros.copy() if curtailment is None else np.asarray(curtailment, dtype=np.float64)
+    lost = (
+        zeros.copy()
+        if curtailment_lost is None
+        else np.asarray(curtailment_lost, dtype=np.float64)
+    )
     return DispatchResult(
         soc_mwh=zeros.copy(),
         charge_mwh=zeros.copy(),
@@ -23,8 +29,8 @@ def _dispatch(*, injection_com, discharge):
         grid_injection_mwh=arr,
         deficit_mwh=zeros.copy(),
         residual_deficit_mwh=zeros.copy(),
-        curtailment_mwh=zeros.copy(),
-        curtailment_lost_mwh=zeros.copy(),
+        curtailment_mwh=curt,
+        curtailment_lost_mwh=lost,
         carga_nao_realizada_diaria_mwh=np.zeros(1),
         ons_curtailment_mwh=zeros.copy(),
         clipping_available_mwh=zeros.copy(),
@@ -135,3 +141,70 @@ def test_pitch_html_renders_equilibrium_modulation_column(tmp_path):
     assert "Modulação de Equilíbrio s/ BESS" in html
     assert "R$ 35/MWh" in html
     assert "PLD dias c/ descarga × 1.75" in html
+
+
+def test_cross_curtailment_scenarios_render_in_section_four(tmp_path):
+    pld = np.full(24, 100.0)
+    injection_sem = np.zeros(24)
+    injection_com = np.zeros(24)
+    discharge = np.zeros(24)
+    curtailment = np.zeros(24)
+    curtailment_lost = np.zeros(24)
+
+    injection_com[1] = 10.0
+    discharge[1] = 10.0
+    curtailment[10] = 5.0
+    curtailment_lost[10] = 2.0
+    data = (
+        _dispatch(
+            injection_com=injection_com,
+            discharge=discharge,
+            curtailment=curtailment,
+            curtailment_lost=curtailment_lost,
+        ),
+        pld,
+        10.0,
+        injection_sem,
+        frozenset({1}),
+        4,
+        2025,
+        1.0,
+        None,
+        None,
+        {
+            "cvar_95_sem_bess_brl": -5000.0,
+            "cvar_95_com_bess_brl": -3500.0,
+        },
+    )
+    dados = {
+        "nome_projeto": "PROJETO TESTE",
+        "potencia_ac_mw": 100.0,
+        "garantia_fisica_mw": 10.0,
+        "energia_bess_mwh": 20.0,
+        "representatividades_gf_pct": 8.0,
+        "capex_total_mm": 10.0,
+        "parcela_capex_mm": 1.0,
+        "opex_anual_mm": 0.2,
+        "premio_anual_seguro_mm": 1.2,
+        "vida_util_anos": 20,
+        "wacc_utilizado_pct": 10.0,
+    }
+
+    bess_pitch_agent.adicionar_cenarios_curtailment_cruzado(
+        dados,
+        {"2025 com curtailment de 2026": data},
+    )
+    cenario = dados["curtailment_cruzado"][0]
+    assert cenario["mod_original_inteira"] == 100
+    assert cenario["mod_com_bess_inteira"] == 96
+    assert cenario["caixa_adicionado_mm"] == pytest.approx(0.001)
+    assert cenario["curtailment_recuperado"] == "60%"
+    assert cenario["delta_cvar_dia_mil"] == pytest.approx(1.5)
+
+    path = tmp_path / "pitch.html"
+    bess_pitch_agent.gerar_html_apresentacao(dados, path)
+
+    html = path.read_text(encoding="utf-8")
+    assert "Sensibilidade Cruzada de Curtailment" in html
+    assert "2025 com curtailment de 2026" in html
+    assert "Sem redução de MUST" in html

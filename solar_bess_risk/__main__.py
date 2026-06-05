@@ -500,6 +500,93 @@ def _compute_must_results(
     return must_results
 
 
+def _compute_pitch_curtailment_swap_scenarios(
+    *,
+    solar,
+    pld_by_year: dict[int, np.ndarray],
+    price_sources_by_year: dict[int, str],
+    params: SimulationParams,
+    gf: float,
+    curtailment_enabled: bool,
+    charge_mode: int,
+    rte_table: dict[int, float],
+    rte_fallback: float,
+    risk_max_solar_years: int | None,
+) -> dict[str, tuple]:
+    """Build no-MUST scenarios with PLD year and curtailment year swapped for pitch."""
+    dur = MUST_REDUCTION_DURATION_H
+    _gen_lim = (
+        solar.generation_lim_mw
+        if solar.generation_lim_mw is not None
+        else solar.generation_mw
+    )
+    swap_specs = [
+        (2025, 2026, "2025 com curtailment de 2026"),
+        (2026, 2025, "2026 com curtailment de 2025"),
+    ]
+
+    swapped: dict[str, tuple] = {}
+    for price_year, curtailment_year, label in swap_specs:
+        if price_year not in pld_by_year:
+            continue
+
+        pld = pld_by_year[price_year]
+        price_source = price_sources_by_year.get(
+            price_year, f"pld_{params.bq_submarket}_{price_year}"
+        )
+        price_profile = PriceProfile(
+            pld,
+            price_source,
+            params.bq_submarket,
+            price_year,
+        )
+        curt_series = get_curtailment_for_scenario(
+            curtailment_year,
+            curtailment_enabled,
+            _gen_lim,
+            factor_2026=params.curtailment_factor_2026,
+        )
+        rte_year = rte_table.get(price_year, rte_fallback)
+        scenario = _get_scenario_for_duration(
+            dur,
+            gf,
+            params.usd_brl_rate,
+            rte=rte_year,
+            charge_mode=charge_mode,
+            coverage_target_pct=params.gf_daily_coverage_target_pct,
+        )
+        dispatch = simulate_scenario(
+            solar,
+            price_profile,
+            scenario,
+            params,
+            curtailment_series=curt_series,
+        )
+        risk_metrics = compute_historical_risk_metrics(
+            solar=solar,
+            prices=price_profile,
+            scenario=scenario,
+            params=params,
+            curtailment_series=curt_series,
+            max_solar_years=risk_max_solar_years,
+        )
+        swapped[label] = (
+            dispatch,
+            pld,
+            gf,
+            _gen_lim,
+            scenario.peak_hours,
+            dur,
+            price_year,
+            rte_year,
+            scenario,
+            None,
+            risk_metrics,
+        )
+
+    return swapped
+
+
 def main() -> None:
     """Run the full analysis pipeline."""
     from solar_bess_risk.manifest import _current_branch
@@ -652,6 +739,18 @@ def main() -> None:
     must_results: list | None = None
     must_reduction_by_key: dict[str, tuple] | None = None
     must_reduction_records: list[dict] = []
+    pitch_curtailment_swap_by_key: dict[str, tuple] = _compute_pitch_curtailment_swap_scenarios(
+        solar=solar,
+        pld_by_year=pld_by_year,
+        price_sources_by_year=price_sources_by_year,
+        params=params,
+        gf=gf,
+        curtailment_enabled=curtailment_enabled,
+        charge_mode=charge_mode,
+        rte_table=rte_table,
+        rte_fallback=rte_fallback,
+        risk_max_solar_years=risk_max_solar_years,
+    )
     if must_sweep_enabled:
         print("  Otimização de redução de MUST por cenário...")
         must_results = _compute_must_results(
@@ -778,6 +877,10 @@ def main() -> None:
             dados_financeiros,
             results_by_key,
             must_reduction_by_key,
+        )
+        dados_financeiros = bess_pitch_agent.adicionar_cenarios_curtailment_cruzado(
+            dados_financeiros,
+            pitch_curtailment_swap_by_key,
         )
         bess_pitch_agent.gerar_html_apresentacao(dados_financeiros, str(caminho_pitch_saida))
 
