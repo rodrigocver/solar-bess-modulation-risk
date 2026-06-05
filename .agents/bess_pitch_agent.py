@@ -1,5 +1,6 @@
 import os
 import re
+import numpy as np
 import numpy_financial as npf
 from bs4 import BeautifulSoup
 
@@ -130,6 +131,142 @@ def calcular_premio_seguro(dados):
     
     return dados
 
+def _modulation_value_brl_per_mwh(injection_mwh, pld_brl_per_mwh, gf_energy_mwh):
+    """Calcula modulação referenciada à energia de garantia física."""
+    if gf_energy_mwh <= 1e-10:
+        return None
+    captured_vs_gf = float(np.sum(injection_mwh * pld_brl_per_mwh) / gf_energy_mwh)
+    return float(np.mean(pld_brl_per_mwh) - captured_vs_gf)
+
+def _duration_from_scenario_name(name):
+    match = re.search(r'(\d+)\s*h', name or '', flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+def _select_result_data(results_by_key, year, duration_h):
+    if not results_by_key:
+        return None
+
+    candidates = []
+    for _label, data in results_by_key.items():
+        if len(data) < 7:
+            continue
+        if data[6] != year:
+            continue
+        if duration_h is not None and data[5] != duration_h:
+            continue
+        candidates.append(data)
+
+    if candidates:
+        return candidates[-1]
+    return None
+
+def _daily_price_scale_mask(discharge_mwh, hours_per_day=24):
+    """Marca todas as horas dos dias em que houve descarga da BESS."""
+    discharge = np.asarray(discharge_mwh, dtype=np.float64) > 1e-10
+    mask = np.zeros_like(discharge, dtype=bool)
+
+    for start in range(0, len(discharge), hours_per_day):
+        end = min(start + hours_per_day, len(discharge))
+        if np.any(discharge[start:end]):
+            mask[start:end] = True
+
+    return mask
+
+def _equilibrium_for_result_data(data, premium_brl):
+    dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
+    tust_savings_brl = data[11] if len(data) > 11 and data[11] is not None else 0.0
+
+    pld_arr = np.asarray(pld, dtype=np.float64)
+    gen_arr = np.asarray(gen, dtype=np.float64)
+    injection_sem = gen_arr - np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)
+    injection_com = np.asarray(dispatch.grid_injection_mwh, dtype=np.float64)
+    price_scale_mask = _daily_price_scale_mask(dispatch.discharge_mwh)
+
+    delta_injection = injection_com - injection_sem
+    cash_without_scaled_days = float(np.sum(delta_injection[~price_scale_mask] * pld_arr[~price_scale_mask]))
+    cash_scaled_days_at_factor_1 = float(np.sum(delta_injection[price_scale_mask] * pld_arr[price_scale_mask]))
+
+    if abs(cash_scaled_days_at_factor_1) <= 1e-10:
+        return None
+
+    factor = (
+        premium_brl
+        - tust_savings_brl
+        - cash_without_scaled_days
+    ) / cash_scaled_days_at_factor_1
+
+    if factor < 0 or not np.isfinite(factor):
+        return None
+
+    pld_equilibrium = pld_arr.copy()
+    pld_equilibrium[price_scale_mask] *= factor
+
+    gf_energy = float(gf) * len(pld_equilibrium)
+    mod_without_bess_equilibrium = _modulation_value_brl_per_mwh(
+        injection_sem,
+        pld_equilibrium,
+        gf_energy,
+    )
+    mod_with_bess_equilibrium = _modulation_value_brl_per_mwh(
+        injection_com,
+        pld_equilibrium,
+        gf_energy,
+    )
+    cash_equilibrium_brl = float(np.sum(delta_injection * pld_equilibrium)) + tust_savings_brl
+
+    if (
+        mod_without_bess_equilibrium is None
+        or mod_with_bess_equilibrium is None
+        or not np.isfinite(mod_without_bess_equilibrium)
+        or not np.isfinite(mod_with_bess_equilibrium)
+    ):
+        return None
+
+    return {
+        'fator_pld_descarga_equilibrio': float(factor),
+        'mod_equilibrio_brl_mwh': float(mod_without_bess_equilibrium),
+        'mod_equilibrio_inteira': int(round(mod_without_bess_equilibrium)),
+        'mod_equilibrio_com_bess_brl_mwh': float(mod_with_bess_equilibrium),
+        'delta_mod_equilibrio_brl_mwh': float(
+            mod_without_bess_equilibrium - mod_with_bess_equilibrium
+        ),
+        'caixa_equilibrio_mm': cash_equilibrium_brl / 1e6,
+    }
+
+def adicionar_modulacao_equilibrio(dados, results_by_key, must_reduction_by_key=None):
+    """Adiciona a modulação que faz o caixa anual igualar o prêmio.
+
+    A simulação fica congelada. O PLD de todas as horas dos dias em que a BESS
+    descarrega recebe um fator linear, e o fator é resolvido analiticamente para igualar:
+    caixa adicionado recalculado = prêmio anual total.
+    """
+    premium_brl = dados.get('premio_anual_seguro_mm', 0.0) * 1e6
+    if premium_brl <= 0:
+        return dados
+
+    scenario_sources = {
+        '2025_base': (2025, results_by_key),
+        '2026_base': (2026, results_by_key),
+        '2025_must': (2025, must_reduction_by_key or {}),
+        '2026_must': (2026, must_reduction_by_key or {}),
+    }
+
+    for scenario_key, (year, source) in scenario_sources.items():
+        scenario_data = dados.get(scenario_key)
+        if not scenario_data:
+            continue
+
+        duration_h = _duration_from_scenario_name(scenario_data.get('nome', ''))
+        result_data = _select_result_data(source, year, duration_h)
+        if result_data is None:
+            continue
+
+        equilibrium = _equilibrium_for_result_data(result_data, premium_brl)
+        if equilibrium:
+            scenario_data.update(equilibrium)
+
+    return dados
+
 def gerar_html_apresentacao(dados, caminho_saida):
     
     # Cabeçalho Técnico (Inteiros)
@@ -156,6 +293,18 @@ def gerar_html_apresentacao(dados, caminho_saida):
     def get_int(cenario_key, field):
         return dados.get(cenario_key, {}).get(field, 0)
 
+    def get_mod_equilibrio(cenario_key):
+        value = dados.get(cenario_key, {}).get('mod_equilibrio_brl_mwh')
+        if value is None:
+            return "n/a"
+        return f"R$ {value:.0f}/MWh"
+
+    def get_fator_equilibrio(cenario_key):
+        value = dados.get(cenario_key, {}).get('fator_pld_descarga_equilibrio')
+        if value is None:
+            return "PLD dias c/ descarga n/a"
+        return f"PLD dias c/ descarga × {value:.2f}"
+
     html_content = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -179,7 +328,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
         * {{ margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }}
         body {{ background-color: #e2e8f0; color: var(--text-dark); padding: 2rem; }}
         
-        .container {{ max-width: 1550px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); padding: 2rem; overflow: hidden; }}
+        .container {{ max-width: 1700px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); padding: 2rem; overflow: hidden; }}
         
         .header {{ border-bottom: 2px solid var(--border); padding-bottom: 1.5rem; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: flex-end; }}
         .header h1 {{ font-size: 1.8rem; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: 0.5px; }}
@@ -220,6 +369,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
         .val-premium {{ color: var(--text-muted); font-size: 0.95rem; }}
         .val-mod-orig {{ color: #b91c1c; }}
         .val-mod-bess {{ color: var(--blue); }}
+        .val-mod-eq {{ color: var(--green); }}
+        .val-factor {{ color: var(--text-muted); font-size: 0.78rem; font-weight: 600; margin-top: 4px; }}
         .val-caixa {{ color: var(--green); font-size: 1.2rem; font-weight: 800; }}
         .val-cvar {{ color: var(--blue); font-size: 0.95rem; }}
         
@@ -294,6 +445,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <th>Prêmio Pago</th>
                     <th>Modulação s/ BESS</th>
                     <th>Modulação c/ BESS</th>
+                    <th>Modulação de Equilíbrio s/ BESS</th>
                     <th>Curtailment / Geração</th>
                     <th>Curtailment Recuperado</th>
                     <th>Caixa Adicionado Total</th>
@@ -309,6 +461,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-premium">R$ {premio:.0f} MM / ano</td>
                     <td class="val-mod-orig">R$ {get_int('2025_base', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2025_base', 'mod_com_bess_inteira')}/MWh</td>
+                    <td class="val-mod-eq">{get_mod_equilibrio('2025_base')}<div class="val-factor">{get_fator_equilibrio('2025_base')}</div></td>
                     <td>{get_text('2025_base', 'curtailment_geracao')}</td>
                     <td>{get_text('2025_base', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2025_base', 'caixa_adicionado_mm'):.0f} MM</td>
@@ -322,6 +475,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-premium">R$ {premio:.0f} MM / ano</td>
                     <td class="val-mod-orig">R$ {get_int('2026_base', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2026_base', 'mod_com_bess_inteira')}/MWh</td>
+                    <td class="val-mod-eq">{get_mod_equilibrio('2026_base')}<div class="val-factor">{get_fator_equilibrio('2026_base')}</div></td>
                     <td>{get_text('2026_base', 'curtailment_geracao')}</td>
                     <td>{get_text('2026_base', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2026_base', 'caixa_adicionado_mm'):.0f} MM</td>
@@ -329,6 +483,9 @@ def gerar_html_apresentacao(dados, caminho_saida):
                 </tr>
             </tbody>
         </table>
+        <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
+            Modulação de Equilíbrio s/ BESS: valor da modulação original recalculado aplicando um fator linear ao PLD de todas as horas dos dias em que a BESS descarrega, mantendo o despacho original, até o Caixa Adicionado Total igualar o Prêmio Anual Total.
+        </p>
     </div>
 
     <div class="section-title"><span>3</span> Desempenho e Retorno do Seguro (Com Otimização de Redução de MUST)</div>
@@ -340,6 +497,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <th>Prêmio Pago</th>
                     <th>Modulação s/ BESS</th>
                     <th>Modulação c/ BESS</th>
+                    <th>Modulação de Equilíbrio s/ BESS</th>
                     <th>Curtailment / Geração</th>
                     <th>Curtailment Recuperado</th>
                     <th>Caixa Adicionado Total*</th>
@@ -355,6 +513,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-premium">R$ {premio:.0f} MM / ano</td>
                     <td class="val-mod-orig">R$ {get_int('2025_must', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2025_must', 'mod_com_bess_inteira')}/MWh</td>
+                    <td class="val-mod-eq">{get_mod_equilibrio('2025_must')}<div class="val-factor">{get_fator_equilibrio('2025_must')}</div></td>
                     <td>{get_text('2025_must', 'curtailment_geracao')}</td>
                     <td>{get_text('2025_must', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2025_must', 'caixa_adicionado_mm'):.0f} MM</td>
@@ -368,6 +527,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
                     <td class="val-premium">R$ {premio:.0f} MM / ano</td>
                     <td class="val-mod-orig">R$ {get_int('2026_must', 'mod_original_inteira')}/MWh</td>
                     <td class="val-mod-bess">R$ {get_int('2026_must', 'mod_com_bess_inteira')}/MWh</td>
+                    <td class="val-mod-eq">{get_mod_equilibrio('2026_must')}<div class="val-factor">{get_fator_equilibrio('2026_must')}</div></td>
                     <td>{get_text('2026_must', 'curtailment_geracao')}</td>
                     <td>{get_text('2026_must', 'curtailment_recuperado')}</td>
                     <td class="val-caixa">+ R$ {get_val('2026_must', 'caixa_adicionado_mm'):.0f} MM</td>

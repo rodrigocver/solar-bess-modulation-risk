@@ -774,6 +774,11 @@ def main() -> None:
         # Executa o pipeline de inteligência e matemática do seguro
         dados_operacionais = bess_pitch_agent.extrair_kpis_do_relatorio(str(output_dir / "relatorio_diretoria.html"))
         dados_financeiros = bess_pitch_agent.calcular_premio_seguro(dados_operacionais)
+        dados_financeiros = bess_pitch_agent.adicionar_modulacao_equilibrio(
+            dados_financeiros,
+            results_by_key,
+            must_reduction_by_key,
+        )
         bess_pitch_agent.gerar_html_apresentacao(dados_financeiros, str(caminho_pitch_saida))
 
         print(f"  [Agente BESS] Dashboard gerado com sucesso: {caminho_pitch_saida}")

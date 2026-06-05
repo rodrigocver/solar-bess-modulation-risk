@@ -38,3 +38,7 @@ coverage.xml
 
 # pytest
 .pytest_cache/
+
+# agentmemory runtime
+data/
+.claude/
