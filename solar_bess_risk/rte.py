@@ -40,8 +40,9 @@ def load_rte_table(
 ) -> dict[int, float]:
     """Load per-year RTE from the Envision Excel file.
 
-    The Excel column ``Ano`` is 0-based BESS age (0 = first year of operation).
-    Calendar year = commissioning_year + Ano.
+    The Excel column ``Ano`` is a 0-based supplier curve reference. The loader
+    maps ``Ano 0`` to ``commissioning_year`` and leaves downstream operational
+    projections to skip that commissioning/pre-operation row when needed.
 
     Parameters
     ----------
@@ -135,8 +136,9 @@ def load_soh_table(
 ) -> dict[int, float]:
     """Load per-year battery SOH from the Envision Excel file.
 
-    The Excel column ``Ano`` is 0-based BESS age (0 = first year of operation).
-    Calendar year = commissioning_year + Ano.
+    The Excel column ``Ano`` is a 0-based supplier curve reference. The loader
+    maps ``Ano 0`` to ``commissioning_year`` and leaves downstream operational
+    projections to skip that commissioning/pre-operation row when needed.
     """
     df = load_bess_degradation_df(path)
     return {

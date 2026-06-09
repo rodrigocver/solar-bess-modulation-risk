@@ -256,7 +256,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Taxa câmbio USD/BRL:   {usd_brl}")
     print(f"  Arquivo RTE:           {rte_path}")
     print(f"  Vida útil:             {useful_life} anos")
-    print(f"  O&M anual BESS:        {bess_om:.1%} do CAPEX")
+    print(f"  O&M anual BESS:        {bess_om:.2%} do CAPEX")
     print(f"  Taxa LCOS/LCOE:        {lcoe_discount_rate:.1%} ao ano")
     print("  Modo BESS:             Arbitragem de PLD (modo 3)")
     print(f"  Curtailment alvo 2026: {curtailment_target_pct_2026:.0f}% da geração")
@@ -327,7 +327,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     else:
         print("  RTE por ano:      não carregado (fallback params)")
     print(f"  Vida útil:        {useful_life} anos")
-    print(f"  O&M anual BESS:   {bess_om:.1%} do CAPEX")
+    print(f"  O&M anual BESS:   {bess_om:.2%} do CAPEX")
     print(f"  Taxa LCOS/LCOE:   {lcoe_discount_rate:.1%} ao ano")
     print(f"  Fator Curt. 2026: {curtailment_factor_2026:.4f}")
     if gf_daily_coverage_target_pct is not None:

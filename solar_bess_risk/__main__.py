@@ -253,6 +253,43 @@ def _parse_must_overrides(argv: list[str]) -> dict[str, float]:
     return overrides
 
 
+def _parse_fixed_must_mw(argv: list[str]) -> float | None:
+    """Parse an optional fixed contracted MUST value from ``argv``.
+
+    ``--must-mw`` is the final contracted MUST in MW, not a reduction
+    percentage. The reduction fraction is derived later as
+    ``1 - must_mw / mwac`` after ``SimulationParams`` are available.
+    """
+    flag = "--must-mw"
+    if flag not in argv:
+        return None
+
+    idx = argv.index(flag)
+    if idx + 1 >= len(argv):
+        raise ValueError(f"ERRO: flag {flag} requer um valor em MW.")
+    try:
+        value = float(argv[idx + 1])
+    except ValueError as exc:
+        raise ValueError(
+            f"ERRO: valor de {flag} ('{argv[idx + 1]}') não é numérico."
+        ) from exc
+    if not np.isfinite(value):
+        raise ValueError(f"ERRO: valor de {flag} deve ser finito.")
+    return value
+
+
+def _fixed_must_reduction_pct(*, fixed_must_mw: float, mwac: float) -> float:
+    """Convert a fixed contracted MUST in MW to a reduction fraction."""
+    if fixed_must_mw < 0.0 or fixed_must_mw > mwac:
+        raise ValueError(
+            "ERRO: --must-mw deve ficar entre 0 e a potência AC do projeto "
+            f"({mwac:.3f} MW). Recebido: {fixed_must_mw:.3f} MW."
+        )
+    if mwac <= 0.0:
+        raise ValueError("ERRO: mwac deve ser > 0 para definir MUST em MW.")
+    return 1.0 - fixed_must_mw / mwac
+
+
 # Duration (hours) used for the per-year MUST-reduction comparative scenarios.
 MUST_REDUCTION_DURATION_H: int = 4
 
@@ -269,12 +306,14 @@ def _compute_must_reduction_scenarios(
     rte_table: dict[int, float],
     soh_table: dict[int, float],
     rte_fallback: float,
+    fixed_must_mw: float | None = None,
 ) -> tuple[dict[str, tuple], list[dict]]:
-    """Optimize MUST reduction per backtest year for the 4h scenario.
+    """Build MUST-reduction comparative scenarios for the 4h case.
 
-    For each year the optimizer finds the MUST reduction that maximizes the
-    net annual benefit; the 4h scenario is then re-simulated under that optimal
-    MUST cap to produce a full hourly dispatch.
+    When ``fixed_must_mw`` is provided, the same contracted MUST value is used
+    for every backtest year. Otherwise, for each year the optimizer finds the
+    MUST reduction that maximizes the net annual benefit. The 4h scenario is
+    then re-simulated under that MUST cap to produce a full hourly dispatch.
 
     Parameters
     ----------
@@ -298,6 +337,8 @@ def _compute_must_reduction_scenarios(
         Per-year battery state of health.
     rte_fallback : float
         RTE used when a year is missing from ``rte_table``.
+    fixed_must_mw : float | None
+        Final contracted MUST in MW. ``None`` means use the optimizer result.
 
     Returns
     -------
@@ -336,15 +377,23 @@ def _compute_must_reduction_scenarios(
             coverage_target_pct=params.gf_daily_coverage_target_pct,
         )
 
-        opt = optimize_must_reduction(
-            solar,
-            price_profile,
-            scenario,
-            params,
-            curtailment_series=curt_series,
-        )
+        if fixed_must_mw is None:
+            opt = optimize_must_reduction(
+                solar,
+                price_profile,
+                scenario,
+                params,
+                curtailment_series=curt_series,
+            )
+            reduction_pct = opt.optimal_reduction_pct
+            must_mw = params.mwac * (1.0 - reduction_pct)
+        else:
+            must_mw = fixed_must_mw
+            reduction_pct = _fixed_must_reduction_pct(
+                fixed_must_mw=must_mw,
+                mwac=params.mwac,
+            )
 
-        must_mw = params.mwac * (1.0 - opt.optimal_reduction_pct)
         dispatch = simulate_scenario(
             solar,
             price_profile,
@@ -357,7 +406,7 @@ def _compute_must_reduction_scenarios(
         # TUST annual savings at the optimal MUST reduction point
         tust_savings_brl_yr = tust_annual_savings_brl(
             tust_brl_per_kw_month=params.tust_brl_per_kw_month,
-            delta_must_mw=params.mwac * opt.optimal_reduction_pct,
+            delta_must_mw=params.mwac * reduction_pct,
         )
 
         # Compute cashflow projection (LCOS/payback) using the MUST-capped dispatch
@@ -386,8 +435,14 @@ def _compute_must_reduction_scenarios(
             must_mw=must_mw,
         )
 
-        pct_label = f"{opt.optimal_reduction_pct * 100:.0f}%"
-        key = f"{year} - {dur}h redução de MUST ({pct_label})"
+        pct_label = f"{reduction_pct * 100:.0f}%"
+        if fixed_must_mw is None:
+            key = f"{year} - {dur}h redução de MUST ({pct_label})"
+        else:
+            key = (
+                f"{year} - {dur}h MUST definido "
+                f"({must_mw:,.0f} MW; redução {pct_label})"
+            )
         reduction_by_key[key] = (
             dispatch,
             pld,
@@ -407,7 +462,7 @@ def _compute_must_reduction_scenarios(
                 "key": key,
                 "year": year,
                 "duration_h": dur,
-                "optimal_reduction_pct": opt.optimal_reduction_pct,
+                "optimal_reduction_pct": reduction_pct,
                 "must_mw": must_mw,
                 "mwac": params.mwac,
                 "dispatch": dispatch,
@@ -604,12 +659,14 @@ def main() -> None:
         print(
             "Uso: python -m solar_bess_risk [--service-account PATH] "
             "[--quick-test] [--skip-excel] [--director-only] [--must-sweep] "
-            "[--tust R$/kW.mes] [--must-sweep-max FRAC] [--must-sweep-step FRAC]"
+            "[--must-mw MW] [--tust R$/kW.mes] [--must-sweep-max FRAC] "
+            "[--must-sweep-step FRAC]"
         )
         print("\nFerramenta de backtest solar + BESS com output HTML.")
         print("  --skip-excel    Não gera backtest_completo.xlsx.")
         print("  --director-only Gera apenas relatorio_diretoria.html + manifest.")
         print("  --must-sweep    Habilita a otimização de redução de MUST por cenário.")
+        print("  --must-mw       MUST contratado definido em MW (desativa otimização).")
         print("  --tust          TUST do projeto em R$/kW·mês (default 7.23).")
         print("  --must-sweep-max  Redução máxima varrida (fração, default 0.40).")
         print("  --must-sweep-step Passo da varredura (fração, default 0.02).")
@@ -629,6 +686,9 @@ def main() -> None:
 
     must_sweep_enabled = "--must-sweep" in sys.argv
     must_overrides = _parse_must_overrides(sys.argv)
+    fixed_must_mw = _parse_fixed_must_mw(sys.argv)
+    if must_sweep_enabled and fixed_must_mw is not None:
+        raise ValueError("ERRO: use --must-sweep ou --must-mw, não ambos.")
 
     # 1. Interactive parameter collection
     if quick_test:
@@ -642,6 +702,15 @@ def main() -> None:
 
     if must_overrides:
         params = replace(params, **must_overrides)
+    if fixed_must_mw is not None:
+        reduction_pct = _fixed_must_reduction_pct(
+            fixed_must_mw=fixed_must_mw,
+            mwac=params.mwac,
+        )
+        print(
+            f"  MUST definido: {fixed_must_mw:,.1f} MW "
+            f"(redução {reduction_pct * 100:.1f}% vs {params.mwac:,.1f} MWac)."
+        )
 
     # 2. Load solar profile
     print("\n[1/5] Carregando perfil solar...")
@@ -833,6 +902,23 @@ def main() -> None:
                 rte_fallback=rte_fallback,
             )
         )
+    elif fixed_must_mw is not None:
+        print("  Cenários comparativos com MUST definido por ano...")
+        must_reduction_by_key, must_reduction_records = (
+            _compute_must_reduction_scenarios(
+                solar=solar,
+                pld_by_year=pld_by_year,
+                price_sources_by_year=price_sources_by_year,
+                params=params,
+                gf=gf,
+                curtailment_enabled=curtailment_enabled,
+                charge_mode=charge_mode,
+                rte_table=rte_table,
+                soh_table=soh_table,
+                rte_fallback=rte_fallback,
+                fixed_must_mw=fixed_must_mw,
+            )
+        )
 
     run_id = generate_run_id()
     project_slug = Path(params.csv_path).stem
@@ -902,6 +988,31 @@ def main() -> None:
     else:
         print("  Excel: pulado (--skip-excel/--director-only)")
 
+    # Premissas-Energia: dispacho conjunto solar+BESS agregado 30 anos × mês.
+    # Exportado sempre, em arquivo separado, sem interferir nos demais relatórios.
+    try:
+        from solar_bess_risk.premissas_energia import export_premissas_energia
+
+        premissas_path = export_premissas_energia(
+            results_by_key=results_by_key,
+            solar=solar,
+            params=params,
+            pld_by_year=pld_by_year,
+            price_sources_by_year=price_sources_by_year,
+            curtailment_enabled=curtailment_enabled,
+            rte_table=rte_table,
+            rte_fallback=rte_fallback,
+            soh_table=soh_table,
+            output_path=output_dir / "premissas_energia.xlsx",
+            scenario_key="2025-4h",
+        )
+        if premissas_path:
+            print(f"  Premissas-Energia: {premissas_path}")
+        else:
+            print("  Premissas-Energia: pulado (cenário 2025-4h indisponível)")
+    except Exception as exc:  # nunca quebra o pipeline principal
+        print(f"  Premissas-Energia: falhou ({exc})", file=sys.stderr)
+
     # Consultancy-style HTML report
     from solar_bess_risk.report_consultancy import build_consultancy_report
     consultancy_path = build_consultancy_report(
@@ -957,6 +1068,7 @@ def main() -> None:
             dados_financeiros,
             str(caminho_pitch_simpl),
             results_by_key,
+            must_reduction_by_key,
         )
         print(f"  [Agente BESS] Dashboard simplificado gerado: {caminho_pitch_simpl}")
     except Exception as e:

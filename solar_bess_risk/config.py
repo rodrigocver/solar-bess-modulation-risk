@@ -57,10 +57,10 @@ PEAK_HOURS_BY_LABEL: dict[str, frozenset[int]] = {
 DEFAULT_BQ_YEAR: int = 2025
 DEFAULT_BQ_SUBMARKET: str = "SE"
 DEFAULT_CAPEX_USD_KWH: float = 200.0  # legacy — kept for backtest.py compat
-DEFAULT_USD_BRL_RATE: float = 5.0
+DEFAULT_USD_BRL_RATE: float = 5.80
 DEFAULT_USEFUL_LIFE_YR: int = 20
 DEFAULT_BESS_ROUNDTRIP_EFFICIENCY: float = 0.85
-DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.015
+DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.0125
 DEFAULT_LCOE_DISCOUNT_RATE: float = 0.1
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,7 @@ def test_projection_uses_lower_future_rte_for_payback_and_lcos():
         scenario=scenario,
         params=params,
         curtailment_series=None,
-        rte_table={2025: 1.0, 2026: 0.50},
+        rte_table={2026: 1.0, 2027: 0.50},
         soh_table={2025: 1.0, 2026: 1.0},
         start_year=2025,
     )
@@ -121,7 +121,7 @@ def test_projection_extends_calendar_years_until_cycle_life_is_reached():
         params=params,
         curtailment_series=None,
         rte_table={2025: 1.0},
-        soh_table={2025: 1.0, 2026: 0.5},
+        soh_table={2026: 1.0, 2027: 0.5},
         start_year=2025,
     )
 
@@ -392,7 +392,7 @@ def test_projection_uses_full_envision_soh_and_rte_curves_for_30_calendar_years(
         start_year=2025,
     )
 
-    expected_years = tuple(range(2025, 2055))
+    expected_years = tuple(range(2026, 2056))
 
     assert projection.projected_calendar_years == 30.0
     assert len(projection.annual_soh) == 30

@@ -208,3 +208,84 @@ def test_cross_curtailment_scenarios_render_in_section_four(tmp_path):
     assert "Sensibilidade Cruzada de Curtailment" in html
     assert "2025 com curtailment de 2026" in html
     assert "Sem redução de MUST" in html
+
+
+def test_simplified_pitch_renders_fixed_must_as_separate_modulation_section(tmp_path):
+    data_base = (
+        _dispatch(injection_com=[0.0, 10.0], discharge=[0.0, 10.0]),
+        np.array([100.0, 100.0]),
+        10.0,
+        np.array([0.0, 0.0]),
+        frozenset({1}),
+        4,
+        2025,
+    )
+    data_must = (
+        _dispatch(injection_com=[0.0, 10.0], discharge=[0.0, 10.0]),
+        np.array([100.0, 100.0]),
+        10.0,
+        np.array([0.0, 0.0]),
+        frozenset({1}),
+        4,
+        2025,
+        1.0,
+        None,
+        None,
+        None,
+        1_000_000.0,
+    )
+
+    base_scenarios = bess_pitch_agent._build_simplified_scenarios(
+        {"2025-4h": data_base},
+        premium_brl=0.0,
+    )
+    must_scenarios, section_label, section_description = (
+        bess_pitch_agent._build_simplified_must_scenarios(
+            {"2025 - 4h MUST definido (540 MW; redução 10%)": data_must},
+            premium_brl=0.0,
+        )
+    )
+
+    assert [s["titulo"] for s in base_scenarios] == [
+        "2025 — Modulação Existente",
+        "2025 — Estressado",
+        "2025 — Leve",
+    ]
+    assert [s["titulo"] for s in must_scenarios] == [
+        "2025 — Modulação Existente",
+        "2025 — Estressado",
+        "2025 — Leve",
+    ]
+    assert section_label == "MUST Definido"
+    assert "540 MW" in section_description
+    assert all(s["economia_must_mm"] == pytest.approx(1.0) for s in must_scenarios)
+    assert must_scenarios[0]["caixa_adicionado_mm"] == pytest.approx(1.001)
+
+    dados = {
+        "nome_projeto": "PROJETO TESTE",
+        "potencia_ac_mw": 600.0,
+        "garantia_fisica_mw": 10.0,
+        "energia_bess_mwh": 20.0,
+        "representatividades_gf_pct": 8.0,
+        "capex_total_mm": 10.0,
+        "parcela_capex_mm": 1.0,
+        "opex_anual_mm": 0.2,
+        "premio_anual_seguro_mm": 1.2,
+        "vida_util_anos": 20,
+        "wacc_utilizado_pct": 10.0,
+    }
+    path = tmp_path / "pitch_simplificado.html"
+    bess_pitch_agent.gerar_html_simplificado(
+        dados,
+        path,
+        {"2025-4h": data_base},
+        {"2025 - 4h MUST definido (540 MW; redução 10%)": data_must},
+    )
+
+    html = path.read_text(encoding="utf-8")
+    assert "Cenários de Modulação com MUST Definido" in html
+    assert "540 MW" in html
+    assert html.count("2025 — Modulação Existente") == 2
+    assert html.count("2025 — Estressado") == 2
+    assert html.count("2025 — Leve") == 2
+    assert "Caixa Adicionado Total inclui" in html

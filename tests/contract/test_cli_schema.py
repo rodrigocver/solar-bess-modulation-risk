@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from solar_bess_risk.config import (
+    DEFAULT_BESS_O_AND_M_PCT_CAPEX,
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BQ_YEAR,
     DEFAULT_LCOE_DISCOUNT_RATE,
@@ -39,19 +40,20 @@ class TestCT01DefaultValues:
     def test_all_defaults_accepted(self, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, csv, mwac, submarket, usd, rte_path, life, om, deg, lcoe
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, 2025 curtailment target, GF coverage target, accept defaults.
+        inputs = [valid_csv, "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, curtailment, _, _ = run_session()
 
         assert params.csv_path == valid_csv
-        assert params.mwac == 100.0
+        assert params.mwac == 600.0
         assert params.bq_submarket == DEFAULT_BQ_SUBMARKET
         assert params.bq_year == DEFAULT_BQ_YEAR
         assert params.usd_brl_rate == DEFAULT_USD_BRL_RATE
+        assert params.bess_o_and_m_pct_capex == DEFAULT_BESS_O_AND_M_PCT_CAPEX
         assert params.useful_life_years == DEFAULT_USEFUL_LIFE_YR
         assert params.lcoe_discount_rate == DEFAULT_LCOE_DISCOUNT_RATE
-        assert curtailment is False
+        assert curtailment is True
 
 
 class TestCT02OutOfBounds:
@@ -60,8 +62,12 @@ class TestCT02OutOfBounds:
     def test_out_of_bounds_usd_brl_reprompts(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, CSV, MWac, submarket, usd=999(OOB), valid, rte_path, life, om, deg, lcoe
-        inputs = ["", "", valid_csv, "100", "", "999", "5.7", "", "", "", "", "", "", ""]
+        # Sequence: csv, defaults through coverage, decline defaults, MWac,
+        # submarket, usd=999(OOB), valid, then remaining defaults.
+        inputs = [
+            valid_csv, "", "", "n", "100", "", "999", "5.7",
+            "", "", "", "", "", "",
+        ]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -76,8 +82,9 @@ class TestCT03NonNumeric:
     def test_non_numeric_reprompts(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, CSV, MWac=abc then 100, rest defaults
-        inputs = ["", "", valid_csv, "abc", "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, defaults through coverage, decline defaults,
+        # MWac=abc then 100, rest defaults.
+        inputs = [valid_csv, "", "", "n", "abc", "100", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -95,8 +102,8 @@ class TestCT04WrongRowCount:
         bad_csv = tmp_path / "bad.csv"
         bad_csv.write_text("\n".join("1.0" for _ in range(8761)))
 
-        # Sequence: curt, charge_mode, bad CSV + mwac, re-prompt: valid CSV + mwac, then defaults
-        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: bad csv, defaults, then recovery prompts valid csv + MWac.
+        inputs = [str(bad_csv), "", "", "", valid_csv, "100"]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -116,8 +123,8 @@ class TestCT05NegativeCSVValue:
         values[42] = "-5.0"
         bad_csv.write_text("\n".join(values))
 
-        # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", str(bad_csv), "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, 2025 curtailment target, GF coverage target, accept defaults.
+        inputs = [str(bad_csv), "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -138,7 +145,7 @@ class TestCT06NonNumericCSV:
         values[10] = "hello"
         bad_csv.write_text("\n".join(values))
 
-        inputs = ["", "", str(bad_csv), "100", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        inputs = [str(bad_csv), "", "", "", valid_csv, "100"]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -152,8 +159,8 @@ class TestCT07MissingCSVPath:
     def test_nonexistent_csv_reprompts(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, bad path, then valid csv+mwac, then defaults
-        inputs = ["", "", "/nonexistent/file.csv", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: bad path, valid csv, defaults.
+        inputs = ["/nonexistent/file.csv", valid_csv, "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -202,8 +209,9 @@ class TestCT10MWacNonPositive:
     def test_zero_mwac_rejected(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, csv, mwac=0, mwac=-5, mwac=100, then defaults
-        inputs = ["", "", valid_csv, "0", "-5", "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, defaults through coverage, decline defaults,
+        # mwac=0, mwac=-5, mwac=100, then remaining defaults.
+        inputs = [valid_csv, "", "", "n", "0", "-5", "100", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -218,8 +226,8 @@ class TestCT11ConfirmationSummary:
     def test_summary_shows_fc_and_gf(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, 2025 curtailment target, GF coverage target, accept defaults.
+        inputs = [valid_csv, "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -227,6 +235,8 @@ class TestCT11ConfirmationSummary:
         # Summary should mention fc and garantia física
         assert "fc" in captured.out.lower() or "fator" in captured.out.lower()
         assert "garantia" in captured.out.lower()
+        assert "5.8" in captured.out
+        assert "1.25%" in captured.out
 
 
 class TestCT12ServiceAccountAbsent:
@@ -235,11 +245,35 @@ class TestCT12ServiceAccountAbsent:
     def test_sa_path_not_in_summary(self, capsys, valid_csv):
         from solar_bess_risk.cli import run_session
 
-        # Sequence: curt, charge_mode, csv, mwac, then defaults
-        inputs = ["", "", valid_csv, "100", "", "", "", "", "", "", "", "", ""]
+        # Sequence: csv, 2025 curtailment target, GF coverage target, accept defaults.
+        inputs = [valid_csv, "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session(service_account_path="/secret/key.json")
 
         captured = capsys.readouterr()
         assert "/secret/key.json" not in captured.out
         assert "service_account_path" not in captured.out.lower()
+
+
+class TestCT13FixedMustMw:
+    """CT-13: --must-mw is interpreted as final contracted MUST in MW."""
+
+    def test_must_mw_flag_converts_to_reduction_fraction(self):
+        from solar_bess_risk.__main__ import (
+            _fixed_must_reduction_pct,
+            _parse_fixed_must_mw,
+        )
+
+        must_mw = _parse_fixed_must_mw(["prog", "--must-mw", "540"])
+
+        assert must_mw == 540.0
+        assert _fixed_must_reduction_pct(
+            fixed_must_mw=must_mw,
+            mwac=600.0,
+        ) == pytest.approx(0.10)
+
+    def test_must_mw_above_project_mwac_is_rejected(self):
+        from solar_bess_risk.__main__ import _fixed_must_reduction_pct
+
+        with pytest.raises(ValueError, match="--must-mw"):
+            _fixed_must_reduction_pct(fixed_must_mw=650.0, mwac=600.0)

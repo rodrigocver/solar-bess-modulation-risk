@@ -159,18 +159,23 @@ def _duration_from_scenario_name(name):
     return int(match.group(1)) if match else None
 
 def _select_result_data(results_by_key, year, duration_h):
+    selected = _select_labeled_result_data(results_by_key, year, duration_h)
+    return selected[1] if selected else None
+
+
+def _select_labeled_result_data(results_by_key, year, duration_h):
     if not results_by_key:
         return None
 
     candidates = []
-    for _label, data in results_by_key.items():
+    for label, data in results_by_key.items():
         if len(data) < 7:
             continue
         if data[6] != year:
             continue
         if duration_h is not None and data[5] != duration_h:
             continue
-        candidates.append(data)
+        candidates.append((label, data))
 
     if candidates:
         return candidates[-1]
@@ -252,6 +257,7 @@ def _equilibrium_for_result_data(data, premium_brl):
 def _scenario_metrics_from_result_data(label, data):
     dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
     risk_metrics = data[10] if len(data) > 10 and isinstance(data[10], dict) else None
+    tust_savings_brl = data[11] if len(data) > 11 and data[11] is not None else 0.0
 
     pld_arr = np.asarray(pld, dtype=np.float64)
     gen_arr = np.asarray(gen, dtype=np.float64)
@@ -263,7 +269,7 @@ def _scenario_metrics_from_result_data(label, data):
     mod_com_bess = _modulation_value_brl_per_mwh(injection_com, pld_arr, gf_energy)
     net_sem = float(np.sum((injection_sem - float(gf)) * pld_arr))
     net_com = float(np.sum((injection_com - float(gf)) * pld_arr))
-    caixa_adicionado = (net_com - net_sem) / 1e6
+    caixa_adicionado = (net_com - net_sem + tust_savings_brl) / 1e6
 
     curt_total = float(np.sum(dispatch.curtailment_mwh))
     curt_lost = float(np.sum(dispatch.curtailment_lost_mwh))
@@ -294,6 +300,7 @@ def _scenario_metrics_from_result_data(label, data):
         'mod_original_inteira': int(round(mod_original)) if mod_original is not None else 0,
         'mod_com_bess_inteira': int(round(mod_com_bess)) if mod_com_bess is not None else 0,
         'caixa_adicionado_mm': caixa_adicionado,
+        'economia_must_mm': tust_savings_brl / 1e6,
         'curtailment_geracao': str(int(round(curt_pct))) + "%",
         'curtailment_ons': str(int(round(curt_ons_pct))) + "%",
         'curtailment_clip': str(int(round(curt_clip_pct))) + "%",
@@ -358,22 +365,16 @@ def _scale_pld_to_target_modulation(
     return np.clip(pld_arr * k, pld_floor, pld_ceil)
 
 
-def _build_simplified_scenarios(results_by_key, premium_brl):
-    """Constrói os 3 cenários 2025 do dashboard simplificado.
+def _clean_must_label(label):
+    return (
+        label.replace("2025 - 4h ", "")
+        .replace("redução de MUST", "Redução de MUST")
+        .replace("MUST definido", "MUST definido")
+    )
 
-    1. Modulação existente (PLD realizado 2025, ONS no alvo configurado).
-    2. Estressado: PLD escalado até modulação s/ BESS = 75 R$/MWh.
-    3. Leve: PLD escalado até modulação s/ BESS = 30 R$/MWh.
 
-    O despacho é congelado; só o PLD muda (clampado em piso/teto). A modulação
-    c/ BESS e o caixa são recalculados sobre o PLD escalado.
-    """
-    base = _select_result_data(results_by_key, 2025, 4)
-    if base is None:
-        base = _select_result_data(results_by_key, 2025, None)
-    if base is None:
-        return []
-
+def _build_modulation_cases(base, premium_brl, *, existing_description):
+    """Build the three simplified modulation cases for an already simulated dispatch."""
     dispatch, pld, gf, gen = base[0], base[1], base[2], base[3]
     injection_sem = (
         np.asarray(gen, dtype=np.float64)
@@ -397,7 +398,7 @@ def _build_simplified_scenarios(results_by_key, premium_brl):
     cenarios = [
         _make(
             "2025 — Modulação Existente",
-            "PLD realizado 2025 · ONS no alvo configurado",
+            existing_description,
             np.asarray(pld, dtype=np.float64),
         ),
         _make(
@@ -416,6 +417,39 @@ def _build_simplified_scenarios(results_by_key, premium_brl):
         ),
     ]
     return cenarios
+
+
+def _build_simplified_scenarios(results_by_key, premium_brl):
+    """Constrói os 3 cenários 2025 sem redução de MUST."""
+    base = _select_result_data(results_by_key, 2025, 4)
+    if base is None:
+        base = _select_result_data(results_by_key, 2025, None)
+    if base is None:
+        return []
+
+    return _build_modulation_cases(
+        base,
+        premium_brl,
+        existing_description="PLD realizado 2025 · ONS no alvo configurado",
+    )
+
+
+def _build_simplified_must_scenarios(must_reduction_by_key, premium_brl):
+    """Constrói os 3 cenários 2025 para o dispatch com MUST reduzido/definido."""
+    must_match = _select_labeled_result_data(must_reduction_by_key, 2025, 4)
+    if must_match is None:
+        return [], "", ""
+
+    label, data = must_match
+    clean_label = _clean_must_label(label)
+    is_fixed_must = "definido" in label.lower()
+    section_label = "MUST Definido" if is_fixed_must else "MUST Otimizado"
+    scenarios = _build_modulation_cases(
+        data,
+        premium_brl,
+        existing_description=f"{clean_label} · PLD realizado 2025",
+    )
+    return scenarios, section_label, clean_label
 
 
 def adicionar_cenarios_curtailment_cruzado(dados, results_by_key):
@@ -825,13 +859,12 @@ def gerar_html_apresentacao(dados, caminho_saida):
         f.write(html_content)
 
 
-def gerar_html_simplificado(dados, caminho_saida, results_by_key):
-    """Gera um dashboard simplificado com os quadros 1 e 2 e 3 cenários 2025.
+def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction_by_key=None):
+    """Gera um dashboard simplificado com prêmio e cenários de modulação 2025.
 
     Quadro 1: cálculo do prêmio anual de seguro (idêntico ao pitch completo).
-    Quadro 2: desempenho com três cenários 2025 — modulação existente,
-    estressado (modulação s/ BESS escalada p/ 75) e leve (modulação 30) —
-    escalando o PLD dentro do piso/teto regulatórios.
+    Quadro 2: três cenários sem MUST. Quadro 3 opcional: três cenários com o
+    MUST reduzido/definido, quando essa fonte é recebida.
     """
     nome_proj = dados.get('nome_projeto', 'PROJETO SOLAR')
     pot_ac = dados.get('potencia_ac_mw', 0.0)
@@ -848,6 +881,12 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key):
 
     premium_brl = premio * 1e6
     cenarios = _build_simplified_scenarios(results_by_key, premium_brl)
+    must_cenarios, must_section_label, must_description = (
+        _build_simplified_must_scenarios(
+            must_reduction_by_key,
+            premium_brl,
+        )
+    )
 
     def _mod_eq_value(cenario):
         value = cenario.get('mod_equilibrio_brl_mwh')
@@ -861,11 +900,12 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key):
             return "PLD dias c/ descarga n/a"
         return f"PLD dias c/ descarga × {value:.2f}"
 
-    badges = ['badge-2025', 'badge-2026', 'badge-2025']
-    rows = []
-    for idx, cenario in enumerate(cenarios):
-        badge_class = badges[idx % len(badges)]
-        rows.append(f"""<tr>
+    def _build_rows(cenarios, empty_message):
+        badges = ['badge-2025', 'badge-2026', 'badge-2025']
+        rows = []
+        for idx, cenario in enumerate(cenarios):
+            badge_class = badges[idx % len(badges)]
+            rows.append(f"""<tr>
                     <td class="col-scenario">
                         <span class="badge-ano {badge_class}">{cenario.get('titulo', '-')}</span><br>
                         <span class="desc-cenario">{cenario.get('descricao', '')}</span>
@@ -880,10 +920,47 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key):
                     <td class="val-caixa">+ R$ {cenario.get('caixa_adicionado_mm', 0.0):.0f} MM</td>
                     <td class="val-cvar">R$ {cenario.get('delta_cvar_dia_mil', 0.0):.0f} mil / dia</td>
                 </tr>""")
-    rows_html = ''.join(rows) if rows else (
-        '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">'
-        'Sem dados de cenário 2025 disponíveis.</td></tr>'
+        return ''.join(rows) if rows else (
+            '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">'
+            f'{empty_message}</td></tr>'
+        )
+
+    rows_html = _build_rows(cenarios, 'Sem dados de cenário 2025 disponíveis.')
+    must_rows_html = _build_rows(
+        must_cenarios,
+        'Sem dados de cenário 2025 com MUST definido disponíveis.',
     )
+    must_section_html = ""
+    if must_cenarios:
+        must_section_html = f"""
+    <div class="section-title"><span>3</span> Desempenho e Retorno do Seguro — Cenários de Modulação com {must_section_label}</div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 20%; text-align: left;">Cenário 2025</th>
+                    <th>Prêmio Pago</th>
+                    <th>Modulação s/ BESS</th>
+                    <th>Modulação c/ BESS</th>
+                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>Curtailment ONS / Geração</th>
+                    <th>Clipping / Geração</th>
+                    <th>Curtailment Recuperado</th>
+                    <th>Caixa Adicionado Total</th>
+                    <th>Redução CVaR 95%</th>
+                </tr>
+            </thead>
+            <tbody>
+                {must_rows_html}
+            </tbody>
+        </table>
+        <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
+            Cenários com {must_description} mantêm o despacho com cap de MUST e,
+            nos casos estressado e leve, escalam apenas o PLD dentro do piso/teto.
+            O Caixa Adicionado Total inclui o ganho operacional mais a economia anual de TUST.
+        </p>
+    </div>
+"""
 
     html_content = f"""<!DOCTYPE html>
 <html lang="pt-BR">
@@ -1043,6 +1120,7 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key):
         </p>
     </div>
 
+{must_section_html}
 </div>
 
 </body>

@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 from solar_bess_risk.config import HOURS_PER_YEAR
-from solar_bess_risk.config import CAPEX_USD_PER_KWH, SCENARIO_TEMPLATES, SimulationParams, size_bess_blocks
+from solar_bess_risk.config import CAPEX_USD_PER_KWH, DEFAULT_RTE_COMMISSIONING_YEAR, SCENARIO_TEMPLATES, SimulationParams, size_bess_blocks
+from solar_bess_risk.projection import rte_for_year, soh_for_year
 from solar_bess_risk.data_sources import (
     BQ_PRIMARY_TABLE,
     DataSourceError,
@@ -274,10 +275,27 @@ def run_historical_backtest(
     *,
     projection_year: int | None = None,
     projection_base_year: int = 2025,
+    rte_table: dict[int, float] | None = None,
+    soh_table: dict[int, float] | None = None,
 ) -> pd.DataFrame:
-    """Run the same solar+BESS sizing against historical PLD years."""
+    """Run the same solar+BESS sizing against historical PLD years.
+
+    The backtest represents Ano 1 of BESS operation. When ``rte_table`` and
+    ``soh_table`` are provided (Envision supplier curve), the Ano 1 RTE and SOH
+    are applied to each scenario before simulation. Ano 0 is skipped.
+    """
     solar = load_solar_csv(params.csv_path, params.mwac)
     scenarios = build_scenarios(solar.garantia_fisica_mw, params)
+
+    # Apply Ano 1 SOH/RTE from the supplier curve (Ano 0 is not an operational year).
+    ano1_year = DEFAULT_RTE_COMMISSIONING_YEAR + 1
+    ano1_rte = rte_for_year(rte_table, ano1_year, params.bess_roundtrip_efficiency) if rte_table else params.bess_roundtrip_efficiency
+    ano1_soh = soh_for_year(soh_table, ano1_year, 1.0) if soh_table else 1.0
+    scenarios = [
+        replace(s, rte=ano1_rte, bess_energy_mwh=s.bess_energy_mwh * ano1_soh)
+        for s in scenarios
+    ]
+
     rows: list[dict] = []
 
     for year in years:

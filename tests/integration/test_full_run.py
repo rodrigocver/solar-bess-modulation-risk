@@ -617,3 +617,58 @@ class TestMustSweepOptInRun:
         content = Path(path).read_text()
         assert "Otimização de Redução de MUST" in content
         assert "MUST ótimo" in content
+
+    def test_fixed_must_mw_builds_comparative_scenarios_without_optimizer(
+        self, params, mock_bq_prices, monkeypatch
+    ):
+        """--must-mw path uses the provided contracted MUST instead of optimizing."""
+        from solar_bess_risk import __main__ as main_mod
+        from solar_bess_risk.profile import load_solar_csv
+        import solar_bess_risk.must_optimizer as must_optimizer
+
+        def fail_optimizer(*_args, **_kwargs):
+            raise AssertionError("optimizer should not run for fixed MUST")
+
+        monkeypatch.setattr(
+            must_optimizer,
+            "optimize_must_reduction",
+            fail_optimizer,
+        )
+
+        solar = load_solar_csv(params.csv_path, params.mwac)
+        fixed_must_mw = 540.0
+        pld_by_year = {year: mock_bq_prices for year in main_mod.BACKTEST_YEARS}
+        price_sources_by_year = {
+            year: f"test_mock_{year}" for year in main_mod.BACKTEST_YEARS
+        }
+
+        scenarios, records = main_mod._compute_must_reduction_scenarios(
+            solar=solar,
+            pld_by_year=pld_by_year,
+            price_sources_by_year=price_sources_by_year,
+            params=params,
+            gf=solar.garantia_fisica_mw,
+            curtailment_enabled=False,
+            charge_mode=3,
+            rte_table={},
+            soh_table={},
+            rte_fallback=1.0,
+            fixed_must_mw=fixed_must_mw,
+        )
+
+        expected_tust = (
+            params.tust_brl_per_kw_month
+            * 12
+            * (params.mwac - fixed_must_mw)
+            * 1000
+        )
+        assert len(records) == len(main_mod.BACKTEST_YEARS)
+        assert all(
+            rec["must_mw"] == pytest.approx(fixed_must_mw)
+            for rec in records
+        )
+        assert all("MUST definido" in key for key in scenarios)
+        assert all(
+            data[11] == pytest.approx(expected_tust)
+            for data in scenarios.values()
+        )

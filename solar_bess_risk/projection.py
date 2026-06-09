@@ -114,7 +114,9 @@ def project_cashflows_with_rte(
     cycle_life_reached = target_lifetime_discharge <= 1e-10
 
     for offset in range(max_calendar_years):
-        cashflow_year = start_year + offset
+        # Ano 0 is the commissioning/pre-operation year and is not counted.
+        # Operational Year 1 corresponds to Ano 1 from the supplier curve.
+        cashflow_year = start_year + offset + 1
         rte = rte_for_year(rte_table, cashflow_year, fallback_rte)
         soh = soh_for_year(soh_table, cashflow_year, 1.0)
         yearly_energy_mwh = scenario.bess_energy_mwh * soh
