@@ -172,7 +172,11 @@ def _build_simulation_params_table(
         ("Fator PLD 2026", f"{displayed_pld_factor:.4f}" if displayed_pld_factor is not None else "auto (BigQuery)")
     )
     rows.append(
-        ("Premissa curtailment 2026", f"{getattr(params, 'curtailment_assumption_pct_2026', 9.2):.1f}*Realizado 2025")
+        (
+            "Premissa curtailment 2026",
+            f"{getattr(params, 'curtailment_factor_2026', 1.0):.2f}\u00d7 Realizado 2025 "
+            f"(alvo {getattr(params, 'curtailment_target_pct_2026', 20.0):.0f}% da gera\u00e7\u00e3o)",
+        )
     )
     rows_html = "".join(
         f"<tr><th>{escape(label)}</th><td>{escape(str(value))}</td></tr>"
@@ -597,7 +601,10 @@ def _build_kpi_table(
         # Split the technical curtailment into its external-grid (ONS) and
         # inverter-clipping (recovered by the BESS) components for the board.
         ons_total = float(np.sum(np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)))
-        clip_total = max(0.0, curt_total - ons_total)
+        # Clipping físico do inversor = max(0, gen_bess − gen_lim). É uma grandeza
+        # independente do curtailment ONS (não um resíduo), medida diretamente do
+        # despacho e normalizada pela geração limitada sem BESS (gen_lim).
+        clip_total = float(np.sum(np.asarray(dispatch.clipping_available_mwh, dtype=np.float64)))
         curtailment_ons_pct = (ons_total / gen_total * 100) if gen_total > 0 else 0
         clipping_pct = (clip_total / gen_total * 100) if gen_total > 0 else 0
 
@@ -654,7 +661,7 @@ def _build_kpi_table(
         <th title="Δ Saldo Líquido dividido pelo módulo do saldo líquido sem BESS.">Δ Saldo Líquido (%)</th>
         <th>Cobertura GF</th>
         <th title="Curtailment externo do ONS (corte de rede) sobre a geração. Não inclui o clipping de inversor nem o corte por redução de MUST.">Curtailment ONS / Geração</th>
-        <th title="Clipping de inversor liberado/recuperado pelo BESS sobre a geração. Componente técnico separado do corte do ONS.">Clipping / Geração</th>
+        <th title="Clipping físico de inversor = max(0, geração com BESS − geração limitada sem BESS), sobre a geração limitada sem BESS. Grandeza independente do corte do ONS.">Clipping / Geração</th>
         <th title="Energia cortada para respeitar o MUST contratado (reduzido). É uma decisão de política comercial para capturar economia de TUST, não uma perda técnica.">Corte MUST / Geração</th>
         <th>Curtailment Recuperado</th>
         <th>Δ CVaR 95% (R$ mil/dia)</th>

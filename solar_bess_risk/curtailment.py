@@ -14,7 +14,6 @@ import pandas as pd
 from solar_bess_risk.config import (
     CURTAILMENT_COLUMN,
     CURTAILMENT_SHEET_2025,
-    CURTAILMENT_SHEET_2026,
     DEFAULT_CURTAILMENT_PATH,
     HOURS_PER_YEAR,
 )
@@ -89,6 +88,7 @@ def get_curtailment_for_scenario(
     solar_generation_mw: np.ndarray,
     path: str = DEFAULT_CURTAILMENT_PATH,
     factor_2026: float = 1.0,
+    factor_2025: float = 1.0,
 ) -> np.ndarray | None:
     """Get the curtailment profile in MW for a given backtest year.
 
@@ -103,8 +103,14 @@ def get_curtailment_for_scenario(
     path : str
         Path to curtailment Excel file.
     factor_2026 : float
-        Scalar multiplier applied to the 2026 curtailment profile.  Default 1.0
-        (profile used as-is).  Only applied when ``year == 2026``.
+        Scalar multiplier applied to the 2025 realized ONS curtailment profile
+        to build the 2026 profile (= target 2026 % / realized 2025 %).  Only
+        applied when ``year == 2026``.
+    factor_2025 : float
+        Scalar multiplier applied to the 2025 realized ONS curtailment profile
+        so its annual curtailment/generation ratio reaches the configured 2025
+        target (= target 2025 % / realized 2025 %).  Applied to ``year == 2025``
+        and accumulated years (which anchor on the 2025 shape).
 
     Returns
     -------
@@ -114,13 +120,13 @@ def get_curtailment_for_scenario(
     if not enabled:
         return None
 
-    if year == 2026:
-        sheet = CURTAILMENT_SHEET_2026
-    else:
-        # 2025 and accumulated use 2025_horario
-        sheet = CURTAILMENT_SHEET_2025
-
-    curtailment_pct = load_curtailment_profile(path, sheet)
+    # 2025, 2026 and accumulated years all anchor on the 2025 realized ONS shape.
+    # For 2026 the profile is scaled by ``factor_2026`` so the annual
+    # curtailment/generation ratio reaches the configured 2026 target. For 2025
+    # (and accumulated years) ``factor_2025`` scales it to the 2025 target.
+    curtailment_pct = load_curtailment_profile(path, CURTAILMENT_SHEET_2025)
     if year == 2026 and factor_2026 != 1.0:
         curtailment_pct = curtailment_pct * factor_2026
+    elif year != 2026 and factor_2025 != 1.0:
+        curtailment_pct = curtailment_pct * factor_2025
     return curtailment_pct * solar_generation_mw

@@ -4,6 +4,15 @@ import numpy as np
 import numpy_financial as npf
 from bs4 import BeautifulSoup
 
+# Piso e teto regulatórios do PLD (R$/MWh). Usados para clampar o PLD escalado
+# ao estressar/relaxar a modulação no dashboard simplificado.
+PLD_FLOOR_BRL_PER_MWH = 57.31
+PLD_CEILING_BRL_PER_MWH = 1611.04
+
+# Alvos de modulação s/ BESS (R$/MWh) dos cenários do dashboard simplificado.
+MODULACAO_ALVO_ESTRESSADO_BRL_MWH = 75.0
+MODULACAO_ALVO_LEVE_BRL_MWH = 30.0
+
 def limpar_numero(texto):
     """Remove textos, espaços e símbolos (como % e R$) para converter em float."""
     if not texto or texto.strip() == "—":
@@ -65,7 +74,10 @@ def extrair_kpis_do_relatorio(caminho_html):
     # 2. Extração dos 4 Cenários na Tabela de Resumo Comparativo
     tabelas_kpi = soup.find_all('table', class_='kpi-table')
     for tab in tabelas_kpi:
-        linhas = tab.find('tbody').find_all('tr')
+        tbody = tab.find('tbody')
+        if tbody is None:
+            continue
+        linhas = tbody.find_all('tr')
         for linha in linhas:
             colunas = linha.find_all('td')
             if not colunas or len(colunas) < 18:
@@ -260,9 +272,11 @@ def _scenario_metrics_from_result_data(label, data):
     curt_pct = (curt_total / gen_total * 100.0) if gen_total > 0 else 0.0
     curt_recovered_pct = (curt_recovered / curt_total * 100.0) if curt_total > 0 else 0.0
     # Split total curtailment into external-grid (ONS) and inverter-clipping
-    # (recovered by the BESS) components.
+    # components. O clipping é a grandeza física max(0, gen_bess − gen_lim)
+    # (dispatch.clipping_available_mwh), independente do corte ONS — NÃO um
+    # resíduo. Ambos os percentuais usam a geração limitada sem BESS (gen_lim).
     ons_total = float(np.sum(np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)))
-    clip_total = max(0.0, curt_total - ons_total)
+    clip_total = float(np.sum(np.asarray(dispatch.clipping_available_mwh, dtype=np.float64)))
     curt_ons_pct = (ons_total / gen_total * 100.0) if gen_total > 0 else 0.0
     curt_clip_pct = (clip_total / gen_total * 100.0) if gen_total > 0 else 0.0
 
@@ -286,6 +300,123 @@ def _scenario_metrics_from_result_data(label, data):
         'curtailment_recuperado': str(int(round(curt_recovered_pct))) + "%",
         'delta_cvar_dia_mil': cvar_delta_mil,
     }
+
+def _scale_pld_to_target_modulation(
+    pld,
+    injection_sem,
+    gf_energy,
+    target_brl_per_mwh,
+    pld_floor=PLD_FLOOR_BRL_PER_MWH,
+    pld_ceil=PLD_CEILING_BRL_PER_MWH,
+):
+    """Escala o PLD por um fator uniforme (com clamp piso/teto) até a modulação
+    s/ BESS atingir ``target_brl_per_mwh``.
+
+    O despacho fica congelado: apenas a série de PLD é escalada e cada hora é
+    limitada ao intervalo regulatório [piso, teto]. Como o clamp quebra a
+    linearidade, o fator é resolvido por bisseção (a modulação é monótona no
+    fator). Retorna a série de PLD já escalada e clampada.
+    """
+    pld_arr = np.asarray(pld, dtype=np.float64)
+
+    def mod_for_factor(k):
+        scaled = np.clip(pld_arr * k, pld_floor, pld_ceil)
+        return _modulation_value_brl_per_mwh(injection_sem, scaled, gf_energy)
+
+    base_mod = mod_for_factor(1.0)
+    if base_mod is None:
+        return pld_arr.copy()
+
+    # Garante o bracketing [k_lo, k_hi] tal que mod(k_lo) <= alvo <= mod(k_hi).
+    k_lo, k_hi = 0.0, 1.0
+    mod_hi = mod_for_factor(k_hi)
+    iters = 0
+    while mod_hi is not None and mod_hi < target_brl_per_mwh and k_hi < 1e6 and iters < 200:
+        k_hi *= 2.0
+        mod_hi = mod_for_factor(k_hi)
+        iters += 1
+
+    mod_lo = mod_for_factor(k_lo)
+    if mod_lo is not None and mod_lo > target_brl_per_mwh:
+        # Alvo abaixo do mínimo alcançável (PLD todo no piso): melhor esforço.
+        return np.clip(pld_arr * k_lo, pld_floor, pld_ceil)
+    if mod_hi is not None and mod_hi < target_brl_per_mwh:
+        # Alvo acima do máximo alcançável (PLD todo no teto): melhor esforço.
+        return np.clip(pld_arr * k_hi, pld_floor, pld_ceil)
+
+    for _ in range(80):
+        k_mid = 0.5 * (k_lo + k_hi)
+        mod_mid = mod_for_factor(k_mid)
+        if mod_mid is None:
+            break
+        if mod_mid < target_brl_per_mwh:
+            k_lo = k_mid
+        else:
+            k_hi = k_mid
+
+    k = 0.5 * (k_lo + k_hi)
+    return np.clip(pld_arr * k, pld_floor, pld_ceil)
+
+
+def _build_simplified_scenarios(results_by_key, premium_brl):
+    """Constrói os 3 cenários 2025 do dashboard simplificado.
+
+    1. Modulação existente (PLD realizado 2025, ONS no alvo configurado).
+    2. Estressado: PLD escalado até modulação s/ BESS = 75 R$/MWh.
+    3. Leve: PLD escalado até modulação s/ BESS = 30 R$/MWh.
+
+    O despacho é congelado; só o PLD muda (clampado em piso/teto). A modulação
+    c/ BESS e o caixa são recalculados sobre o PLD escalado.
+    """
+    base = _select_result_data(results_by_key, 2025, 4)
+    if base is None:
+        base = _select_result_data(results_by_key, 2025, None)
+    if base is None:
+        return []
+
+    dispatch, pld, gf, gen = base[0], base[1], base[2], base[3]
+    injection_sem = (
+        np.asarray(gen, dtype=np.float64)
+        - np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)
+    )
+    gf_energy = float(gf) * len(np.asarray(pld, dtype=np.float64))
+
+    def _make(label, descricao, scaled_pld):
+        data = list(base)
+        data[1] = scaled_pld
+        data = tuple(data)
+        metrics = _scenario_metrics_from_result_data(label, data)
+        metrics["titulo"] = label
+        metrics["descricao"] = descricao
+        if premium_brl > 0:
+            equilibrium = _equilibrium_for_result_data(data, premium_brl)
+            if equilibrium:
+                metrics.update(equilibrium)
+        return metrics
+
+    cenarios = [
+        _make(
+            "2025 — Modulação Existente",
+            "PLD realizado 2025 · ONS no alvo configurado",
+            np.asarray(pld, dtype=np.float64),
+        ),
+        _make(
+            "2025 — Estressado",
+            f"Modulação s/ BESS escalada p/ R$ {MODULACAO_ALVO_ESTRESSADO_BRL_MWH:.0f}/MWh",
+            _scale_pld_to_target_modulation(
+                pld, injection_sem, gf_energy, MODULACAO_ALVO_ESTRESSADO_BRL_MWH
+            ),
+        ),
+        _make(
+            "2025 — Leve",
+            f"Modulação s/ BESS escalada p/ R$ {MODULACAO_ALVO_LEVE_BRL_MWH:.0f}/MWh",
+            _scale_pld_to_target_modulation(
+                pld, injection_sem, gf_energy, MODULACAO_ALVO_LEVE_BRL_MWH
+            ),
+        ),
+    ]
+    return cenarios
+
 
 def adicionar_cenarios_curtailment_cruzado(dados, results_by_key):
     """Adiciona cenários sem MUST com PLD de um ano e curtailment do outro."""
@@ -684,6 +815,233 @@ def gerar_html_apresentacao(dados, caminho_saida):
     </div>
 
 {cruzados_section}
+
+</div>
+
+</body>
+</html>"""
+
+    with open(caminho_saida, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+
+
+def gerar_html_simplificado(dados, caminho_saida, results_by_key):
+    """Gera um dashboard simplificado com os quadros 1 e 2 e 3 cenários 2025.
+
+    Quadro 1: cálculo do prêmio anual de seguro (idêntico ao pitch completo).
+    Quadro 2: desempenho com três cenários 2025 — modulação existente,
+    estressado (modulação s/ BESS escalada p/ 75) e leve (modulação 30) —
+    escalando o PLD dentro do piso/teto regulatórios.
+    """
+    nome_proj = dados.get('nome_projeto', 'PROJETO SOLAR')
+    pot_ac = dados.get('potencia_ac_mw', 0.0)
+    gf_mw = dados.get('garantia_fisica_mw', 0.0)
+    rep_gf = dados.get('representatividades_gf_pct', 0.0)
+
+    energia = dados.get('energia_bess_mwh', 0)
+    capex_total = dados.get('capex_total_mm', 0)
+    parcela_anual = dados.get('parcela_capex_mm', 0)
+    opex_anual = dados.get('opex_anual_mm', 0)
+    premio = dados.get('premio_anual_seguro_mm', 0)
+    vida_util = dados.get('vida_util_anos', 20)
+    wacc_pct = dados.get('wacc_utilizado_pct', 0.0)
+
+    premium_brl = premio * 1e6
+    cenarios = _build_simplified_scenarios(results_by_key, premium_brl)
+
+    def _mod_eq_value(cenario):
+        value = cenario.get('mod_equilibrio_brl_mwh')
+        if value is None:
+            return "n/a"
+        return f"R$ {value:.0f}/MWh"
+
+    def _fator_eq_value(cenario):
+        value = cenario.get('fator_pld_descarga_equilibrio')
+        if value is None:
+            return "PLD dias c/ descarga n/a"
+        return f"PLD dias c/ descarga × {value:.2f}"
+
+    badges = ['badge-2025', 'badge-2026', 'badge-2025']
+    rows = []
+    for idx, cenario in enumerate(cenarios):
+        badge_class = badges[idx % len(badges)]
+        rows.append(f"""<tr>
+                    <td class="col-scenario">
+                        <span class="badge-ano {badge_class}">{cenario.get('titulo', '-')}</span><br>
+                        <span class="desc-cenario">{cenario.get('descricao', '')}</span>
+                    </td>
+                    <td class="val-premium">R$ {premio:.0f} MM / ano</td>
+                    <td class="val-mod-orig">R$ {int(round(cenario.get('mod_original_inteira', 0)))}/MWh</td>
+                    <td class="val-mod-bess">R$ {int(round(cenario.get('mod_com_bess_inteira', 0)))}/MWh</td>
+                    <td class="val-mod-eq">{_mod_eq_value(cenario)}<div class="val-factor">{_fator_eq_value(cenario)}</div></td>
+                    <td>{cenario.get('curtailment_ons', '0%')}</td>
+                    <td>{cenario.get('curtailment_clip', '0%')}</td>
+                    <td>{cenario.get('curtailment_recuperado', '0%')}</td>
+                    <td class="val-caixa">+ R$ {cenario.get('caixa_adicionado_mm', 0.0):.0f} MM</td>
+                    <td class="val-cvar">R$ {cenario.get('delta_cvar_dia_mil', 0.0):.0f} mil / dia</td>
+                </tr>""")
+    rows_html = ''.join(rows) if rows else (
+        '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">'
+        'Sem dados de cenário 2025 disponíveis.</td></tr>'
+    )
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Simplificado: BESS {nome_proj}</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+        :root {{
+            --navy: #0f172a;
+            --blue: #1d4ed8;
+            --green: #059669;
+            --emerald: #10b981;
+            --bg-light: #f8fafc;
+            --border: #e2e8f0;
+            --text-dark: #1e293b;
+            --text-muted: #64748b;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }}
+        body {{ background-color: #e2e8f0; color: var(--text-dark); padding: 2rem; }}
+
+        .container {{ max-width: 1700px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); padding: 2rem; overflow: hidden; }}
+
+        .header {{ border-bottom: 2px solid var(--border); padding-bottom: 1.5rem; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: flex-end; }}
+        .header h1 {{ font-size: 1.8rem; font-weight: 800; color: var(--navy); text-transform: uppercase; letter-spacing: 0.5px; }}
+        .header h1 span {{ color: var(--blue); }}
+        .header p {{ color: var(--text-muted); font-size: 1.1rem; font-weight: 600; }}
+
+        .project-summary {{ display: flex; gap: 2rem; background: var(--navy); color: white; padding: 1.2rem 2rem; border-radius: 8px; margin-bottom: 2rem; }}
+        .summary-item {{ display: flex; flex-direction: column; }}
+        .summary-item .s-label {{ font-size: 0.75rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }}
+        .summary-item .s-value {{ font-size: 1.2rem; font-weight: 700; }}
+
+        .section-title {{ font-size: 1.25rem; font-weight: 700; color: var(--navy); margin-bottom: 1rem; display: flex; align-items: center; }}
+        .section-title span {{ background: var(--blue); color: white; width: 28px; height: 28px; display: inline-flex; justify-content: center; align-items: center; border-radius: 50%; font-size: 0.9rem; margin-right: 10px; }}
+
+        .calc-box {{ background: var(--bg-light); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; margin-bottom: 2.5rem; }}
+        .calc-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem; align-items: center; }}
+        .calc-item {{ text-align: center; }}
+        .calc-item .label {{ font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; margin-bottom: 0.5rem; }}
+        .calc-item .value {{ font-size: 1.4rem; font-weight: 800; color: var(--navy); }}
+        .calc-operator {{ text-align: center; font-size: 1.5rem; font-weight: 800; color: var(--text-muted); }}
+        .calc-total {{ background: linear-gradient(135deg, var(--green), var(--emerald)); color: white; padding: 1rem; border-radius: 8px; box-shadow: 0 4px 10px rgba(5,150,105,0.2); }}
+        .calc-total .label {{ color: rgba(255,255,255,0.9); }}
+        .calc-total .value {{ color: white; font-size: 1.6rem; }}
+
+        .table-container {{ margin-bottom: 2.5rem; }}
+        table {{ width: 100%; border-collapse: collapse; text-align: center; }}
+        th {{ background: #1e293b; color: white; padding: 1rem; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #1e293b; }}
+        td {{ padding: 1.2rem 0.8rem; border: 1px solid var(--border); font-size: 1.05rem; font-weight: 600; color: var(--text-dark); vertical-align: middle; }}
+
+        tr:nth-child(even) td {{ background-color: var(--bg-light); }}
+
+        .col-scenario {{ text-align: left; background: var(--bg-light); }}
+        .badge-ano {{ display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 0.85rem; font-weight: 700; margin-bottom: 4px; }}
+        .badge-2025 {{ background: #e0f2fe; color: #0369a1; }}
+        .badge-2026 {{ background: #fee2e2; color: #b91c1c; }}
+        .desc-cenario {{ font-size: 0.9rem; color: var(--text-muted); font-weight: 400; }}
+
+        .val-premium {{ color: var(--text-muted); font-size: 0.95rem; }}
+        .val-mod-orig {{ color: #b91c1c; }}
+        .val-mod-bess {{ color: var(--blue); }}
+        .val-mod-eq {{ color: var(--green); }}
+        .val-factor {{ color: var(--text-muted); font-size: 0.78rem; font-weight: 600; margin-top: 4px; }}
+        .val-caixa {{ color: var(--green); font-size: 1.2rem; font-weight: 800; }}
+        .val-cvar {{ color: var(--blue); font-size: 0.95rem; }}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <div>
+            <h1>Ativo de Proteção de Caixa — BESS <span>{nome_proj}</span></h1>
+            <p>Apresentação Executiva Simplificada: Prêmio e Cenários de Modulação 2025</p>
+        </div>
+    </div>
+
+    <div class="project-summary">
+        <div class="summary-item">
+            <div class="s-label">Projeto Executivo</div>
+            <div class="s-value" style="color: var(--emerald);">{nome_proj}</div>
+        </div>
+        <div class="summary-item" style="border-left: 1px solid #334155; padding-left: 1.5rem;">
+            <div class="s-label">Potência Inicial AC</div>
+            <div class="s-value">{pot_ac:.0f} MWac</div>
+        </div>
+        <div class="summary-item" style="border-left: 1px solid #334155; padding-left: 1.5rem;">
+            <div class="s-label">Garantia Física (GF)</div>
+            <div class="s-value">{gf_mw:.0f} MWmédio</div>
+        </div>
+        <div class="summary-item" style="border-left: 1px solid #334155; padding-left: 1.5rem;">
+            <div class="s-label">Dimensionamento BESS</div>
+            <div class="s-value">{energia:.0f} MWh</div>
+        </div>
+        <div class="summary-item" style="border-left: 1px solid #334155; padding-left: 1.5rem;">
+            <div class="s-label">Taxa de Cobertura Diária da GF</div>
+            <div class="s-value" style="color: var(--emerald);">{rep_gf:.0f}%</div>
+        </div>
+    </div>
+
+    <div class="section-title"><span>1</span> Cálculo do Prêmio Anual de Seguro</div>
+    <div class="calc-box">
+        <div class="calc-grid">
+            <div class="calc-item">
+                <div class="label">Capex Total</div>
+                <div class="value">R$ {capex_total:.0f} MM</div>
+            </div>
+            <div class="calc-item" style="border-left: 1px solid var(--border); border-right: 1px solid var(--border);">
+                <div class="label">Premissas de Custo</div>
+                <div class="value" style="font-size: 1rem; margin-top: 5px;">Taxa: {wacc_pct:.2f}% a.a.<br>Vida: {vida_util} anos</div>
+            </div>
+            <div class="calc-item">
+                <div class="label">Parcela Anual (Capex)</div>
+                <div class="value">R$ {parcela_anual:.0f} MM</div>
+            </div>
+            <div class="calc-operator">+</div>
+            <div class="calc-item">
+                <div class="label">O&M Anual</div>
+                <div class="value">R$ {opex_anual:.0f} MM</div>
+            </div>
+            <div class="calc-item calc-total">
+                <div class="label">Prêmio Anual Total</div>
+                <div class="value">R$ {premio:.0f} MM</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section-title"><span>2</span> Desempenho e Retorno do Seguro — Cenários de Modulação 2025</div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 20%; text-align: left;">Cenário 2025</th>
+                    <th>Prêmio Pago</th>
+                    <th>Modulação s/ BESS</th>
+                    <th>Modulação c/ BESS</th>
+                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>Curtailment ONS / Geração</th>
+                    <th>Clipping / Geração</th>
+                    <th>Curtailment Recuperado</th>
+                    <th>Caixa Adicionado Total</th>
+                    <th>Redução CVaR 95%</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+        <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
+            Cenários estressado e leve mantêm o despacho de 2025 e escalam o PLD por um fator uniforme,
+            limitado ao piso (R$ {PLD_FLOOR_BRL_PER_MWH:.2f}/MWh) e ao teto (R$ {PLD_CEILING_BRL_PER_MWH:.2f}/MWh),
+            até a modulação s/ BESS atingir R$ {MODULACAO_ALVO_ESTRESSADO_BRL_MWH:.0f}/MWh e R$ {MODULACAO_ALVO_LEVE_BRL_MWH:.0f}/MWh, respectivamente.
+        </p>
+    </div>
 
 </div>
 

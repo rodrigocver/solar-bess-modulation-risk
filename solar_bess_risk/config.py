@@ -87,7 +87,28 @@ DEFAULT_PLD_FACTOR_2026: float | None = None
 
 # Scalar multiplier applied to the curtailment profile loaded for 2026.
 # 1.0 = use the profile as-is; e.g. 0.8 = 20% lower curtailment in 2026.
+# Computed at runtime as ``curtailment_target_pct_2026 / realized_2025_ons_pct``.
 DEFAULT_CURTAILMENT_FACTOR_2026: float = 1.0
+
+# Target ONS curtailment for 2026 as a percentage of generation. The 2026
+# curtailment profile is the 2025 realized ONS shape scaled so the annual
+# curtailment/generation ratio reaches this target.
+DEFAULT_CURTAILMENT_TARGET_PCT_2026: float = 20.0
+
+# Scalar multiplier applied to the 2025 realized ONS curtailment profile so its
+# annual curtailment/generation ratio reaches ``curtailment_target_pct_2025``.
+# Computed at runtime as ``curtailment_target_pct_2025 / realized_2025_ons_pct``.
+DEFAULT_CURTAILMENT_FACTOR_2025: float = 1.0
+
+# Target ONS curtailment for 2025 as a percentage of generation. The 2025
+# realized ONS shape is scaled so the annual curtailment/generation ratio
+# reaches this target (default 10%).
+DEFAULT_CURTAILMENT_TARGET_PCT_2025: float = 10.0
+
+# PLD regulatory floor and ceiling (R$/MWh). Used to clamp scaled PLD series
+# when stressing/relaxing the modulation in the simplified pitch dashboard.
+PLD_FLOOR_BRL_PER_MWH: float = 57.31
+PLD_CEILING_BRL_PER_MWH: float = 1611.04
 
 # Curtailment factor assumption embedded in the previsao_futura sheet of
 # media_agregada_horaria_2025_2026.xlsx — informational/metadata only.
@@ -233,6 +254,9 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "must_sweep_step_pct": (1e-6, 1.0),
     "pld_factor_2026": (0.0, 100.0),
     "curtailment_factor_2026": (0.0, 100.0),
+    "curtailment_target_pct_2026": (0.0, 100.0),
+    "curtailment_factor_2025": (0.0, 100.0),
+    "curtailment_target_pct_2025": (0.0, 100.0),
     "gf_daily_coverage_target_pct": (0.0, 2.0),
 }
 
@@ -283,8 +307,13 @@ class SimulationParams:
         Scalar multiplier applied to the 2025 PLD base when filling unobserved
         2026 hours.  None → factor is auto-calculated from BigQuery observed data.
     curtailment_factor_2026 : float
-        Scalar multiplier applied to the 2026 curtailment profile (e.g. 0.8 =
-        20% less curtailment than the base previsao_futura sheet).  Default 1.0.
+        Scalar multiplier applied to the 2025 realized ONS curtailment profile to
+        build the 2026 profile. Computed at runtime as
+        ``curtailment_target_pct_2026 / realized_2025_ons_pct``.  Default 1.0.
+    curtailment_target_pct_2026 : float
+        Target ONS curtailment for 2026 as a percentage of generation (default
+        20%). Drives ``curtailment_factor_2026`` relative to the 2025 realized
+        ONS curtailment.
     curtailment_assumption_pct_2026 : float
         Curtailment factor assumption used when building the previsao_futura
         sheet (aba da media_agregada_horaria_2025_2026.xlsx). Purely informational
@@ -307,6 +336,9 @@ class SimulationParams:
     must_sweep_step_pct: float = MUST_SWEEP_STEP_PCT
     pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
     curtailment_factor_2026: float = DEFAULT_CURTAILMENT_FACTOR_2026
+    curtailment_target_pct_2026: float = DEFAULT_CURTAILMENT_TARGET_PCT_2026
+    curtailment_factor_2025: float = DEFAULT_CURTAILMENT_FACTOR_2025
+    curtailment_target_pct_2025: float = DEFAULT_CURTAILMENT_TARGET_PCT_2025
     curtailment_assumption_pct_2026: float = CURTAILMENT_ASSUMPTION_PCT_2026
     gf_daily_coverage_target_pct: float | None = DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
 
@@ -324,6 +356,9 @@ class SimulationParams:
             ("must_sweep_max_pct", self.must_sweep_max_pct),
             ("must_sweep_step_pct", self.must_sweep_step_pct),
             ("curtailment_factor_2026", self.curtailment_factor_2026),
+            ("curtailment_target_pct_2026", self.curtailment_target_pct_2026),
+            ("curtailment_factor_2025", self.curtailment_factor_2025),
+            ("curtailment_target_pct_2025", self.curtailment_target_pct_2025),
             *((("pld_factor_2026", self.pld_factor_2026),) if self.pld_factor_2026 is not None else ()),
             *(
                 (("gf_daily_coverage_target_pct", self.gf_daily_coverage_target_pct),)

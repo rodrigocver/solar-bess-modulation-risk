@@ -10,11 +10,11 @@ from __future__ import annotations
 import os
 
 from solar_bess_risk.config import (
-    CURTAILMENT_ASSUMPTION_PCT_2026,
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BESS_O_AND_M_PCT_CAPEX,
     DEFAULT_CURTAILMENT_FACTOR_2026,
-    DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT,
+    DEFAULT_CURTAILMENT_TARGET_PCT_2025,
+    DEFAULT_CURTAILMENT_TARGET_PCT_2026,
     DEFAULT_LCOE_DISCOUNT_RATE,
     DEFAULT_PLD_FACTOR_2026,
     DEFAULT_RTE_PATH,
@@ -29,8 +29,10 @@ from solar_bess_risk.profile import load_solar_csv
 from solar_bess_risk.rte import load_rte_table
 
 # ── Defaults fixos do projeto padrão ──────────────────────────────────────────
-DEFAULT_CSV_PATH = "solar/solar_getulina_ii_m8_450mw_id5.csv"
-DEFAULT_MWAC = 450.0
+DEFAULT_CSV_PATH = "solar/solar_baguacu_m2_600mw_id8.csv"
+DEFAULT_MWAC = 600.0
+# Cobertura diária da GF sugerida na CLI (20% — alinhado ao pitch padrão).
+DEFAULT_CLI_GF_DAILY_COVERAGE_PCT = 0.20
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -170,17 +172,18 @@ def _prompt_coverage_target() -> float | None:
     Returns
     -------
     float | None
-        Target coverage as a fraction (e.g. 0.5 for 50%), or ``None`` to keep the
-        legacy power-based BESS sizing. Accepts a percentage value (0-200).
+        Target coverage as a fraction (e.g. 0.5 for 50%). Defaults to the project
+        standard (20%) when the user just presses Enter. Accepts a percentage
+        value (0-200).
     """
     lo, hi = PARAM_BOUNDS["gf_daily_coverage_target_pct"]
     while True:
         raw = input(
             "  Cobertura diaria da GF desejada [%] "
-            "(Enter = dimensionar por potencia): "
+            f"(padrão {DEFAULT_CLI_GF_DAILY_COVERAGE_PCT * 100:.0f}%): "
         ).strip()
         if raw == "":
-            return DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
+            return DEFAULT_CLI_GF_DAILY_COVERAGE_PCT
         try:
             pct = float(raw.replace(",", "."))
         except ValueError:
@@ -200,24 +203,86 @@ def _prompt_rte_path(default: str = DEFAULT_RTE_PATH) -> str:
 
 
 def run_session(service_account_path: str | None = None) -> tuple:
-    """Run the full interactive parameter collection session.
+    """Run the streamlined interactive parameter collection session.
+
+    Only three questions are asked interactively: (1) solar CSV path,
+    (2) target ONS curtailment for 2025, and (3) desired GF daily coverage.
+    Every other parameter is shown as a defaults block and accepted with a
+    single confirmation (``Seguir com o padrão? [S/n]``). Answering ``n`` falls
+    back to per-parameter prompts for the remaining defaults.
 
     Returns
     -------
     tuple[SimulationParams, bool, str, int]
         Parameters, whether curtailment is enabled, RTE file path, and charge_mode.
     """
-    # 0. Curtailment prompt (first, per spec §8.1)
-    curtailment_enabled = _prompt_curtailment()
-
-    # 0b. BESS dispatch mode
-    charge_mode = _prompt_charge_mode()
-
-    # 1. CSV path — project default
+    # ── Pergunta 1: caminho do CSV solar ─────────────────────────────────────
     csv_path = _prompt_csv_path()
 
-    # 2. MWac — project default
-    mwac = _prompt_mwac()
+    # ── Pergunta 2: curtailment ONS alvo (2025) ──────────────────────────────
+    # Curtailment fica sempre ativado; a série realizada de 2025 é escalada para
+    # atingir este alvo (o fator vs 2025 é calculado depois de carregar o solar).
+    curtailment_enabled = True
+    ct_lo, ct_hi = PARAM_BOUNDS["curtailment_target_pct_2025"]
+    curtailment_target_pct_2025 = _prompt_float(
+        "Curtailment ONS alvo",
+        "% da geração",
+        DEFAULT_CURTAILMENT_TARGET_PCT_2025,
+        ct_lo,
+        ct_hi,
+    )
+
+    # ── Pergunta 3: cobertura diária da GF desejada ──────────────────────────
+    print()
+    print("  ── Dimensionamento do BESS ──")
+    gf_daily_coverage_target_pct = _prompt_coverage_target()
+
+    # ── Defaults do projeto padrão (apresentados de uma vez) ─────────────────
+    mwac = DEFAULT_MWAC
+    bq_submarket = DEFAULT_BQ_SUBMARKET
+    usd_brl = DEFAULT_USD_BRL_RATE
+    rte_path = DEFAULT_RTE_PATH
+    useful_life = DEFAULT_USEFUL_LIFE_YR
+    bess_om = DEFAULT_BESS_O_AND_M_PCT_CAPEX
+    lcoe_discount_rate = DEFAULT_LCOE_DISCOUNT_RATE
+    charge_mode = 3
+    pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
+    curtailment_factor_2026 = DEFAULT_CURTAILMENT_FACTOR_2026
+    curtailment_target_pct_2026 = DEFAULT_CURTAILMENT_TARGET_PCT_2026
+
+    print("\n  ━━━ Demais parâmetros (padrão do projeto) ━━━")
+    print(f"  Capacidade MWac:       {mwac:.0f}")
+    print(f"  Submercado BQ:         {bq_submarket}")
+    print(f"  Taxa câmbio USD/BRL:   {usd_brl}")
+    print(f"  Arquivo RTE:           {rte_path}")
+    print(f"  Vida útil:             {useful_life} anos")
+    print(f"  O&M anual BESS:        {bess_om:.1%} do CAPEX")
+    print(f"  Taxa LCOS/LCOE:        {lcoe_discount_rate:.1%} ao ano")
+    print("  Modo BESS:             Arbitragem de PLD (modo 3)")
+    print(f"  Curtailment alvo 2026: {curtailment_target_pct_2026:.0f}% da geração")
+
+    aceitar = input("\n  Seguir com o padrão? [S/n]: ").strip().lower()
+    if aceitar in ("n", "nao", "não", "no"):
+        print("\n  ── Ajuste dos parâmetros ──")
+        mwac = _prompt_mwac(mwac)
+        bq_submarket = _prompt_submarket(bq_submarket)
+        rate_lo, rate_hi = PARAM_BOUNDS["usd_brl_rate"]
+        usd_brl = _prompt_float("Taxa de câmbio USD/BRL", "BRL/USD", usd_brl, rate_lo, rate_hi)
+        rte_path = _prompt_rte_path(rte_path)
+        life_lo, life_hi = int(PARAM_BOUNDS["useful_life_years"][0]), int(PARAM_BOUNDS["useful_life_years"][1])
+        useful_life = _prompt_int("Vida útil", "anos", useful_life, life_lo, life_hi)
+        om_lo, om_hi = PARAM_BOUNDS["bess_o_and_m_pct_capex"]
+        bess_om = _prompt_float("O&M anual BESS", "fração do CAPEX", bess_om, om_lo, om_hi)
+        lcoe_lo, lcoe_hi = PARAM_BOUNDS["lcoe_discount_rate"]
+        lcoe_discount_rate = _prompt_float(
+            "Taxa de retorno para LCOS/LCOE", "fração/ano", lcoe_discount_rate, lcoe_lo, lcoe_hi
+        )
+        charge_mode = _prompt_charge_mode()
+        ct26_lo, ct26_hi = PARAM_BOUNDS["curtailment_target_pct_2026"]
+        curtailment_target_pct_2026 = _prompt_float(
+            "Curtailment ONS alvo 2026", "% da geração",
+            curtailment_target_pct_2026, ct26_lo, ct26_hi,
+        )
 
     # Carrega e valida CSV imediatamente para mostrar fc/garantia_fisica
     try:
@@ -226,43 +291,12 @@ def run_session(service_account_path: str | None = None) -> tuple:
         print(f"  ERRO: {exc}")
         while True:
             csv_path = _prompt_csv_path()
-            mwac = _prompt_mwac()
+            mwac = _prompt_mwac(mwac)
             try:
                 profile = load_solar_csv(csv_path, mwac)
                 break
             except (ValueError, RuntimeError) as exc2:
                 print(f"  ERRO: {exc2}")
-
-    # 3. Parâmetros opcionais com defaults
-    bq_submarket = _prompt_submarket()
-    rate_lo, rate_hi = PARAM_BOUNDS["usd_brl_rate"]
-    usd_brl = _prompt_float("Taxa de câmbio USD/BRL", "BRL/USD", DEFAULT_USD_BRL_RATE, rate_lo, rate_hi)
-    rte_path = _prompt_rte_path()
-    life_lo, life_hi = int(PARAM_BOUNDS["useful_life_years"][0]), int(PARAM_BOUNDS["useful_life_years"][1])
-    useful_life = _prompt_int("Vida útil", "anos", DEFAULT_USEFUL_LIFE_YR, life_lo, life_hi)
-    om_lo, om_hi = PARAM_BOUNDS["bess_o_and_m_pct_capex"]
-    bess_om = _prompt_float(
-        "O&M anual BESS",
-        "fração do CAPEX",
-        DEFAULT_BESS_O_AND_M_PCT_CAPEX,
-        om_lo,
-        om_hi,
-    )
-    lcoe_lo, lcoe_hi = PARAM_BOUNDS["lcoe_discount_rate"]
-    lcoe_discount_rate = _prompt_float(
-        "Taxa de retorno para LCOS/LCOE",
-        "fração/ano",
-        DEFAULT_LCOE_DISCOUNT_RATE,
-        lcoe_lo,
-        lcoe_hi,
-    )
-
-    # 4. Dimensionamento do BESS por cobertura diária da GF (opcional)
-    pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
-    curtailment_factor_2026 = DEFAULT_CURTAILMENT_FACTOR_2026
-    print()
-    print("  ── Dimensionamento do BESS ──")
-    gf_daily_coverage_target_pct = _prompt_coverage_target()
 
     # Load RTE table for summary display (best-effort)
     rte_preview: dict[int, float] = {}
@@ -279,7 +313,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Garantia Física:  {profile.garantia_fisica_mw:.2f} MW")
     print(f"  Submercado:       {bq_submarket}")
     print(f"  USD/BRL:          {usd_brl}")
-    print(f"  Curtailment:      {'Ativado' if curtailment_enabled else 'Desativado'}")
+    print("  Curtailment:      Ativado")
     modo_label = "Arbitragem de PLD (modo 3)" if charge_mode == 3 else "Cobertura de Déficit (modo 0)"
     print(f"  Modo BESS:        {modo_label}")
     print(f"  Arquivo RTE:      {rte_path}")
@@ -295,16 +329,19 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Vida útil:        {useful_life} anos")
     print(f"  O&M anual BESS:   {bess_om:.1%} do CAPEX")
     print(f"  Taxa LCOS/LCOE:   {lcoe_discount_rate:.1%} ao ano")
-    if pld_factor_2026 is not None:
-        print(f"  Fator PLD 2026:   {pld_factor_2026:.4f} (manual)")
-    else:
-        print("  Fator PLD 2026:   auto (BigQuery)")
     print(f"  Fator Curt. 2026: {curtailment_factor_2026:.4f}")
     if gf_daily_coverage_target_pct is not None:
         print(f"  Cobertura GF/dia: {gf_daily_coverage_target_pct:.1%} (dimensiona por energia)")
     else:
         print("  Cobertura GF/dia: dimensionamento por potência (padrão)")
-    print(f"  Premissa curt. 2026: {CURTAILMENT_ASSUMPTION_PCT_2026:.1f} (fator planilha previsao_futura)")
+    print(
+        f"  Curtailment alvo 2025: {curtailment_target_pct_2025:.0f}% da geração "
+        "(fator vs realizado calculado após carregar o perfil solar)"
+    )
+    print(
+        f"  Curtailment alvo 2026: {curtailment_target_pct_2026:.0f}% da geração "
+        "(fator vs 2025 calculado após carregar o perfil solar)"
+    )
 
     params = SimulationParams(
         csv_path=csv_path,
@@ -317,6 +354,8 @@ def run_session(service_account_path: str | None = None) -> tuple:
         bq_service_account_path=service_account_path,
         pld_factor_2026=pld_factor_2026,
         curtailment_factor_2026=curtailment_factor_2026,
+        curtailment_target_pct_2026=curtailment_target_pct_2026,
+        curtailment_target_pct_2025=curtailment_target_pct_2025,
         gf_daily_coverage_target_pct=gf_daily_coverage_target_pct,
     )
     return params, curtailment_enabled, rte_path, charge_mode

@@ -326,7 +326,9 @@ def _compute_must_reduction_scenarios(
         )
         price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
         curt_series = get_curtailment_for_scenario(
-            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+            year, curtailment_enabled, _gen_lim,
+            factor_2026=params.curtailment_factor_2026,
+            factor_2025=params.curtailment_factor_2025,
         )
 
         scenario = _get_scenario_for_duration(
@@ -479,7 +481,9 @@ def _compute_must_results(
         )
         price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
         curt_series = get_curtailment_for_scenario(
-            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+            year, curtailment_enabled, _gen_lim,
+            factor_2026=params.curtailment_factor_2026,
+            factor_2025=params.curtailment_factor_2025,
         )
 
         for dur in DURATIONS:
@@ -545,6 +549,7 @@ def _compute_pitch_curtailment_swap_scenarios(
             curtailment_enabled,
             _gen_lim,
             factor_2026=params.curtailment_factor_2026,
+            factor_2025=params.curtailment_factor_2025,
         )
         rte_year = rte_table.get(price_year, rte_fallback)
         scenario = _get_scenario_for_duration(
@@ -643,6 +648,44 @@ def main() -> None:
     solar = load_solar_csv(params.csv_path, params.mwac)
     gf = solar.garantia_fisica_mw
 
+    # Derive the 2026 ONS curtailment factor relative to the 2025 realized ONS
+    # curtailment. The 2026 profile is the 2025 shape scaled so its annual
+    # curtailment/generation ratio reaches ``curtailment_target_pct_2026``.
+    if curtailment_enabled:
+        from solar_bess_risk.config import CURTAILMENT_SHEET_2025, DEFAULT_CURTAILMENT_PATH
+        from solar_bess_risk.curtailment import load_curtailment_profile
+
+        _gen_lim_arr = np.asarray(
+            solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw,
+            dtype=np.float64,
+        )
+        _sum_gen = float(np.sum(_gen_lim_arr))
+        _base_curt_frac = load_curtailment_profile(DEFAULT_CURTAILMENT_PATH, CURTAILMENT_SHEET_2025)
+        realized_2025_ons_pct = (
+            100.0 * float(np.sum(_base_curt_frac * _gen_lim_arr)) / _sum_gen if _sum_gen > 0 else 0.0
+        )
+        if realized_2025_ons_pct > 1e-9:
+            curt_factor_2026 = params.curtailment_target_pct_2026 / realized_2025_ons_pct
+            curt_factor_2025 = params.curtailment_target_pct_2025 / realized_2025_ons_pct
+        else:
+            curt_factor_2026 = 1.0
+            curt_factor_2025 = 1.0
+        params = replace(
+            params,
+            curtailment_factor_2026=curt_factor_2026,
+            curtailment_factor_2025=curt_factor_2025,
+        )
+        print(
+            f"  Curtailment 2025: alvo {params.curtailment_target_pct_2025:.0f}% "
+            f"(realizado {realized_2025_ons_pct:.1f}%) "
+            f"→ fator {curt_factor_2025:.2f}× sobre realizado"
+        )
+        print(
+            f"  Curtailment 2026: alvo {params.curtailment_target_pct_2026:.0f}% "
+            f"(realizado 2025 {realized_2025_ons_pct:.1f}%) "
+            f"→ fator {curt_factor_2026:.2f}× sobre 2025"
+        )
+
     # Load RTE table (per-year round-trip efficiency)
     try:
         rte_table = load_rte_table(rte_path)
@@ -686,7 +729,9 @@ def main() -> None:
         # ONS curtailment is scaled by sem-BESS generation (gen_lim)
         _gen_lim = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
         curt_series = get_curtailment_for_scenario(
-            year, curtailment_enabled, _gen_lim, factor_2026=params.curtailment_factor_2026
+            year, curtailment_enabled, _gen_lim,
+            factor_2026=params.curtailment_factor_2026,
+            factor_2025=params.curtailment_factor_2025,
         )
         pld = pld_by_year[year]
         rte_year = rte_table.get(year, rte_fallback)
@@ -791,7 +836,26 @@ def main() -> None:
 
     run_id = generate_run_id()
     project_slug = Path(params.csv_path).stem
-    output_dir = Path("output") / project_slug / run_id
+    # Output folder named by the chosen scenario (curtailment ONS alvo + cobertura
+    # diária da GF) instead of a timestamp, e.g. ``curt10_gf20``.
+    if curtailment_enabled:
+        curt_label = f"curt{int(round(params.curtailment_target_pct_2025))}"
+    else:
+        curt_label = "curtoff"
+    if params.gf_daily_coverage_target_pct is not None:
+        gf_label = f"gf{int(round(params.gf_daily_coverage_target_pct * 100))}"
+    else:
+        gf_label = "gfpot"
+    folder_name = f"{curt_label}_{gf_label}"
+    # Re-running the same configuration must not overwrite a previous run: when
+    # the folder already exists, append an incremental suffix (``_2``, ``_3``…).
+    base_dir = Path("output") / project_slug
+    output_dir = base_dir / folder_name
+    if output_dir.exists():
+        n = 2
+        while (base_dir / f"{folder_name}_{n}").exists():
+            n += 1
+        output_dir = base_dir / f"{folder_name}_{n}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Export hourly dispatch (8760h) under the optimal MUST per year.
@@ -885,6 +949,16 @@ def main() -> None:
         bess_pitch_agent.gerar_html_apresentacao(dados_financeiros, str(caminho_pitch_saida))
 
         print(f"  [Agente BESS] Dashboard gerado com sucesso: {caminho_pitch_saida}")
+
+        # Pitch simplificado: quadros 1 e 2 com 3 cenários 2025 (existente,
+        # estressado e leve) escalando a modulação dentro do piso/teto do PLD.
+        caminho_pitch_simpl = output_dir / "pitch_simplificado_bess.html"
+        bess_pitch_agent.gerar_html_simplificado(
+            dados_financeiros,
+            str(caminho_pitch_simpl),
+            results_by_key,
+        )
+        print(f"  [Agente BESS] Dashboard simplificado gerado: {caminho_pitch_simpl}")
     except Exception as e:
         print(f"  [Aviso Agente BESS] Não foi possível rodar o dashboard automático: {e}")
     # =========================================================================
