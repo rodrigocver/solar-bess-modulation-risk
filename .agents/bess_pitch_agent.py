@@ -933,7 +933,7 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction
     must_section_html = ""
     if must_cenarios:
         must_section_html = f"""
-    <div class="section-title"><span>3</span> Desempenho e Retorno do Seguro — Cenários de Modulação com {must_section_label}</div>
+    <div class="section-title"><span>3</span> Desempenho e Retorno do Seguro — Cenários de Modulação com {must_section_label}: {must_description}</div>
     <div class="table-container">
         <table>
             <thead>
