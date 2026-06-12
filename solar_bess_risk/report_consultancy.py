@@ -20,7 +20,12 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from solar_bess_risk.config import CAPEX_USD_PER_KWH, HOURS_PER_YEAR
+from solar_bess_risk.config import (
+    CAPEX_USD_PER_KWH,
+    DEFAULT_MODULATION_MODE,
+    HOURS_PER_YEAR,
+)
+from solar_bess_risk.modulation import modulation_value_brl_per_mwh
 from solar_bess_risk.simulation import DispatchResult
 
 
@@ -83,43 +88,16 @@ def _modulation_value_brl_per_mwh(
     injection_mwh: np.ndarray,
     pld_brl_per_mwh: np.ndarray,
     gf_energy_mwh: float,
+    mode: str = DEFAULT_MODULATION_MODE,
 ) -> float | None:
-    """Return modulation cost per MWh of garantia física (GF).
+    """Thin wrapper around :func:`modulation_value_brl_per_mwh`.
 
-    A modulação é referenciada à **obrigação de entrega** (garantia física),
-    não à energia injetada ou gerada. O benchmark é a entrega flat da GF
-    valorizada hora-a-hora ao PLD; a energia efetivamente injetada apenas
-    *abate* esse custo:
-
-        custo_total = Σ_h (GF − injeção_h) × PLD_h
-                    = GF × PLD_médio × horas − Σ(injeção × PLD)
-
-    Normalizado pela energia de GF, em R$/MWh:
-
-        modulação = PLD_médio − Σ(injeção × PLD) / energia_GF
-
-    O custo do curtailment não é descontado aqui na base: a energia não
-    injetada simplesmente deixa de abater o custo de modulação, elevando-o
-    (a exposição financeira do curtailment é contabilizada separadamente).
-
-    Parameters
-    ----------
-    injection_mwh : np.ndarray
-        Hourly grid injection in MWh.
-    pld_brl_per_mwh : np.ndarray
-        Hourly PLD in BRL/MWh.
-    gf_energy_mwh : float
-        Garantia física energy over the period (GF_mw × horas).
-
-    Returns
-    -------
-    float | None
-        Modulation cost in BRL per MWh of GF, or None when GF energy is zero.
+    Kept for backward compatibility within this module; delegates to the
+    centralized modulation implementation so the formula lives in one place.
     """
-    if gf_energy_mwh <= 1e-10:
-        return None
-    captured_vs_gf = float(np.sum(injection_mwh * pld_brl_per_mwh) / gf_energy_mwh)
-    return float(np.mean(pld_brl_per_mwh) - captured_vs_gf)
+    return modulation_value_brl_per_mwh(
+        injection_mwh, pld_brl_per_mwh, gf_energy_mwh, mode
+    )
 
 
 def _format_optional_brl_mwh(value: float | None) -> str:
@@ -176,6 +154,15 @@ def _build_simulation_params_table(
             "Premissa curtailment 2026",
             f"{getattr(params, 'curtailment_factor_2026', 1.0):.2f}\u00d7 Realizado 2025 "
             f"(alvo {getattr(params, 'curtailment_target_pct_2026', 20.0):.0f}% da gera\u00e7\u00e3o)",
+        )
+    )
+    modulation_mode = getattr(params, "modulation_mode", DEFAULT_MODULATION_MODE)
+    rows.append(
+        (
+            "C\u00e1lculo da modula\u00e7\u00e3o",
+            "Energia (pr\u00eamio de captura, R$/MWh injetado)"
+            if modulation_mode == DEFAULT_MODULATION_MODE
+            else "Garantia f\u00edsica (custo, R$/MWh GF)",
         )
     )
     rows_html = "".join(
@@ -383,6 +370,7 @@ def _build_deficit_chart(
 
 def _build_modulation_comparison_chart(
     results_by_key: dict[str, tuple],
+    modulation_mode: str = DEFAULT_MODULATION_MODE,
 ) -> str:
     """Chart: modulation cost comparison across all scenarios."""
     labels = []
@@ -395,8 +383,8 @@ def _build_modulation_comparison_chart(
         injection_sem = gen - dispatch.ons_curtailment_mwh
         injection_com = dispatch.grid_injection_mwh
         labels.append(tab_name)
-        mod_sem.append(_modulation_value_brl_per_mwh(injection_sem, pld, gf_energy) or 0.0)
-        mod_com.append(_modulation_value_brl_per_mwh(injection_com, pld, gf_energy) or 0.0)
+        mod_sem.append(_modulation_value_brl_per_mwh(injection_sem, pld, gf_energy, modulation_mode) or 0.0)
+        mod_com.append(_modulation_value_brl_per_mwh(injection_com, pld, gf_energy, modulation_mode) or 0.0)
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
@@ -409,9 +397,15 @@ def _build_modulation_comparison_chart(
         x=labels, y=mod_com,
         marker_color='#4CAF50',
     ))
+    if modulation_mode == DEFAULT_MODULATION_MODE:
+        chart_title = "Prêmio de Captura (Modulação por Energia) por Cenário"
+        yaxis_title = "Modulação (R$/MWh injetado)"
+    else:
+        chart_title = "Redução do Custo de Modulação por Cenário"
+        yaxis_title = "Modulação (R$/MWh GF)"
     fig.update_layout(
-        title="Redução do Custo de Modulação por Cenário",
-        yaxis_title="Modulação (R$/MWh GF)",
+        title=chart_title,
+        yaxis_title=yaxis_title,
         barmode='group',
         template="plotly_white",
         height=450,
@@ -464,6 +458,7 @@ def _build_comparative_summary(
     usd_brl_rate: float,
     garantia_fisica_mw: float,
     fc: float,
+    modulation_mode: str = DEFAULT_MODULATION_MODE,
 ) -> str:
     """Build the comparative summary grouped by backtest year.
 
@@ -504,7 +499,7 @@ def _build_comparative_summary(
         if not grouped:
             continue
         case_label = _CASE_LABELS.get(year, "Cenário")
-        table = _build_kpi_table(grouped, mwac, usd_brl_rate, garantia_fisica_mw, fc)
+        table = _build_kpi_table(grouped, mwac, usd_brl_rate, garantia_fisica_mw, fc, modulation_mode)
         sections.append(
             f'<h3 class="case-heading">{escape(case_label)} ({year})</h3>\n{table}'
         )
@@ -518,6 +513,7 @@ def _build_kpi_table(
     usd_brl_rate: float,
     garantia_fisica_mw: float,
     fc: float,
+    modulation_mode: str = DEFAULT_MODULATION_MODE,
 ) -> str:
     """Build a summary KPI table for the board."""
     rows_html = ""
@@ -553,8 +549,8 @@ def _build_kpi_table(
         # A energia injetada abate o custo; a referência é sempre a GF, não a injeção.
         # Sem BESS: injection_sem; Com BESS: injection_com (despacho desloca entrega ao pico).
         gf_energy = gf * HOURS_PER_YEAR
-        modulation_original = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy)
-        modulation_com_bess = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy)
+        modulation_original = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy, modulation_mode)
+        modulation_com_bess = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy, modulation_mode)
         modulation_delta = (
             modulation_com_bess - modulation_original
             if modulation_original is not None and modulation_com_bess is not None
@@ -959,8 +955,9 @@ def build_consultancy_report(
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    modulation_mode = getattr(params, "modulation_mode", DEFAULT_MODULATION_MODE)
     # Build overview charts (cross-scenario)
-    modulation_chart = _build_modulation_comparison_chart(results_by_key)
+    modulation_chart = _build_modulation_comparison_chart(results_by_key, modulation_mode)
     coverage_chart = _build_coverage_chart(results_by_key)
     kpi_table = _build_comparative_summary(
         results_by_key,
@@ -969,6 +966,7 @@ def build_consultancy_report(
         usd_brl_rate,
         garantia_fisica_mw,
         fc,
+        modulation_mode,
     )
     params_table = _build_simulation_params_table(
         params=params,

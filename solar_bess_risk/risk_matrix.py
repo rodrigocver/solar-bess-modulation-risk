@@ -23,11 +23,13 @@ from dataclasses import dataclass
 import numpy as np
 
 from solar_bess_risk.config import (
+    DEFAULT_MODULATION_MODE,
     RISK_MATRIX_CURTAILMENT_TARGETS_PCT,
     RISK_MATRIX_PLD_FACTORS,
     SimulationParams,
 )
 from solar_bess_risk.data_sources import PriceProfile
+from solar_bess_risk.modulation import modulation_value_brl_per_mwh
 from solar_bess_risk.profile import SolarProfile
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
@@ -41,12 +43,12 @@ def _modulation_value_brl_per_mwh(
     injection_mwh: np.ndarray,
     pld_brl_per_mwh: np.ndarray,
     gf_energy_mwh: float,
+    mode: str = DEFAULT_MODULATION_MODE,
 ) -> float | None:
-    """Modulation referenced to the physical-guarantee energy (R$/MWh)."""
-    if gf_energy_mwh <= 1e-10:
-        return None
-    captured_vs_gf = float(np.sum(injection_mwh * pld_brl_per_mwh) / gf_energy_mwh)
-    return float(np.mean(pld_brl_per_mwh) - captured_vs_gf)
+    """Modulation metric (R$/MWh) — delegates to the centralized implementation."""
+    return modulation_value_brl_per_mwh(
+        injection_mwh, pld_brl_per_mwh, gf_energy_mwh, mode
+    )
 
 
 def _daily_price_scale_mask(discharge_mwh: np.ndarray, hours_per_day: int = 24) -> np.ndarray:
@@ -86,6 +88,7 @@ def _equilibrium_modulation_brl_per_mwh(
     discharge_mwh: np.ndarray,
     gf_energy_mwh: float,
     premium_brl: float,
+    mode: str = DEFAULT_MODULATION_MODE,
 ) -> float | None:
     """Modulação de equilíbrio s/ BESS.
 
@@ -108,7 +111,7 @@ def _equilibrium_modulation_brl_per_mwh(
 
     pld_eq = pld_arr.copy()
     pld_eq[mask] *= factor
-    value = _modulation_value_brl_per_mwh(injection_sem, pld_eq, gf_energy_mwh)
+    value = _modulation_value_brl_per_mwh(injection_sem, pld_eq, gf_energy_mwh, mode)
     if value is None or not np.isfinite(value):
         return None
     return float(value)
@@ -202,6 +205,7 @@ def compute_risk_matrix(
     gf = float(solar.garantia_fisica_mw)
     gf_energy = gf * len(base_pld)
     premium_brl = annual_insurance_premium_brl(scenario, params)
+    modulation_mode = getattr(params, "modulation_mode", DEFAULT_MODULATION_MODE)
 
     sum_gen_lim = float(np.sum(gen_lim))
 
@@ -251,8 +255,8 @@ def compute_risk_matrix(
             injection_sem = gen_lim - np.asarray(dispatch.ons_curtailment_mwh, dtype=np.float64)
             injection_com = np.asarray(dispatch.grid_injection_mwh, dtype=np.float64)
 
-            mod_sem = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy)
-            mod_com = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy)
+            mod_sem = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy, modulation_mode)
+            mod_com = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy, modulation_mode)
             net_sem = float(np.sum((injection_sem - gf) * pld))
             net_com = float(np.sum((injection_com - gf) * pld))
             caixa_mm = (net_com - net_sem) / 1e6
@@ -263,6 +267,7 @@ def compute_risk_matrix(
                 discharge_mwh=dispatch.discharge_mwh,
                 gf_energy_mwh=gf_energy,
                 premium_brl=premium_brl,
+                mode=modulation_mode,
             )
 
             # Realized ONS curtailment % (scaled base, excludes inverter clipping).

@@ -1052,12 +1052,18 @@ def main() -> None:
             dados_financeiros,
             results_by_key,
             must_reduction_by_key,
+            mode=params.modulation_mode,
         )
         dados_financeiros = bess_pitch_agent.adicionar_cenarios_curtailment_cruzado(
             dados_financeiros,
             pitch_curtailment_swap_by_key,
+            mode=params.modulation_mode,
         )
-        bess_pitch_agent.gerar_html_apresentacao(dados_financeiros, str(caminho_pitch_saida))
+        bess_pitch_agent.gerar_html_apresentacao(
+            dados_financeiros,
+            str(caminho_pitch_saida),
+            mode=params.modulation_mode,
+        )
 
         print(f"  [Agente BESS] Dashboard gerado com sucesso: {caminho_pitch_saida}")
 
@@ -1069,6 +1075,7 @@ def main() -> None:
             str(caminho_pitch_simpl),
             results_by_key,
             must_reduction_by_key,
+            mode=params.modulation_mode,
         )
         print(f"  [Agente BESS] Dashboard simplificado gerado: {caminho_pitch_simpl}")
     except Exception as e:

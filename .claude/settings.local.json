@@ -10,7 +10,27 @@
       "Bash(python -m solar_bess_risk --quick-test)",
       "Bash(python -m pytest tests/unit/test_simulation.py -v)",
       "Bash(.venv/bin/python3.11 -m pytest tests/unit/test_simulation.py -v)",
-      "Bash(python3 -c \"import solar_bess_risk; print\\('ok'\\)\")"
+      "Bash(python3 -c \"import solar_bess_risk; print\\('ok'\\)\")",
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(wsl.exe -d debian --cd /home/cver/projects/solar-bess-modulation-risk -- .venv/bin/python -c ' *)",
+      "Bash(python3 -c ' *)",
+      "PowerShell(wsl.exe -d debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && .venv/bin/python --version && ls new_projects/pld-solar-monthly-modulation/src/solar_monthly_modulation\")",
+      "Bash(awk -F';' 'NR>2 {split\\($3,d,\"/\"\\); years[d[3]]++} END {for \\(y in years\\) print y, years[y]}' \"dados/Brazil Q2 26 \\(Central\\)-bra-central-brl2025-system-1h.csv\")",
+      "Bash(awk -F';' 'NR>1 && $6>0 {n++; s+=$6; if\\($6>mx\\)mx=$6} END {print \"nonzero rows:\", n, \"mean pct of nonzero:\", s/n, \"max:\", mx}' dados/curtailment_8760_conj_seriemas_i_ano_medio_total_pct.csv)",
+      "Bash(awk -F';' 'NR>1 {s+=$6} END {print \"mean pct all 8760:\", s/8760}' dados/curtailment_8760_conj_seriemas_i_ano_medio_total_pct.csv)",
+      "Bash(awk -F';' 'NR>1 && $6>0' dados/curtailment_8760_conj_seriemas_i_ano_medio_total_pct.csv)",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\) if\\($i==\"modulation_brl_mwh_energy\"\\) c=i; print \"col:\",c} NR>1{s+=$c; n++; if\\($c<mn||n==1\\)mn=$c; if\\($c>mx||n==1\\)mx=$c} END{print \"mean mod:\",s/n,\" min:\",mn,\" max:\",mx}' output/curvas/modulacao_brazil_q2_26_central_2030_2059.csv)",
+      "Bash(wsl.exe -d debian --cd /home/cver/projects/solar-bess-modulation-risk -- bash -lc \"which python3 && python3 --version && ls .venv 2>/dev/null | head -3\")",
+      "Bash(wsl.exe -l -q)",
+      "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && which python3 && python3 --version && ls .venv/bin 2>/dev/null | head -5\")",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){if\\($i==\"curtailment_target_pct\"\\)a=i; if\\($i==\"bess_coverage_pct\"\\)b=i; if\\($i==\"mod_cost_brl_mwh_contract\"\\)c=i; if\\($i==\"spread_brl_mwh\"\\)d=i}} NR>1{key=$a\"_\"$b; s[key]+=$c; n[key]++} END{for\\(k in s\\) print k, s[k]/n[k]}' output/modulacao_contrato/modulacao_contrato_bess_150.3mw_anual.csv)",
+      "Bash(sort -t_ -k1,1n -k2,2n)",
+      "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && .venv/bin/python -c 'import solar_bess_risk, numpy, pandas; from solar_bess_risk.simulation import simulate_scenario; from solar_bess_risk.rte import load_rte_table; print\\(\\\\\"imports ok\\\\\"\\)'\")",
+      "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && time .venv/bin/python scripts/calc_modulacao_alvo_bess.py --quick\")",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){if\\($i==\"mod_target_brl_mwh\"\\)t=i; if\\($i==\"curtailment_target_pct\"\\)c=i; if\\($i==\"bess_coverage_pct\"\\)b=i; if\\($i==\"mod_cost_brl_mwh\"\\)m=i; if\\($i==\"curt_lost_pct_gen\"\\)p=i}} NR>1{key=$t\"|\"$c\"|\"$b; mod[key]+=$m; curt[key]+=$p; n[key]++} END{for\\(k in mod\\) printf \"%s  mod=%.2f  curt_pos=%.2f%%\\\\n\", k, mod[k]/n[k], curt[k]/n[k]}' output/modulacao_alvo/modulacao_alvo_bess_anual.csv)",
+      "Bash(sort -t'|' -k1,1n -k2,2n -k3,3n)",
+      "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && time .venv/bin/python scripts/calc_modulacao_alvo_bess.py\")",
+      "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){if\\($i==\"mod_target_brl_mwh\"\\)t=i; if\\($i==\"curtailment_target_pct\"\\)c=i; if\\($i==\"bess_coverage_pct\"\\)b=i; if\\($i==\"mod_cost_brl_mwh\"\\)m=i; if\\($i==\"curt_lost_pct_gen\"\\)p=i; if\\($i==\"curt_recovered_gwh\"\\)r=i}} NR>1{key=$t\"|\"$c\"|\"$b; mod[key]+=$m; curt[key]+=$p; rec[key]+=$r; n[key]++} END{for\\(k in mod\\) printf \"%s  mod=%.2f  curt_pos=%.2f%%  rec=%.1fGWh\\\\n\", k, mod[k]/n[k], curt[k]/n[k], rec[k]/n[k]}' output/modulacao_alvo/modulacao_alvo_bess_anual.csv)"
     ]
   }
 }

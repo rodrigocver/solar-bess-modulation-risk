@@ -64,6 +64,28 @@ DEFAULT_BESS_O_AND_M_PCT_CAPEX: float = 0.0125
 DEFAULT_LCOE_DISCOUNT_RATE: float = 0.1
 
 # ---------------------------------------------------------------------------
+# Modulation metric mode
+# ---------------------------------------------------------------------------
+
+# How the modulação metric (R$/MWh) is computed:
+#
+#   "energia"          → prêmio de captura ponderado pela energia.
+#                        mod = Σ(injeção_h × PLD_h) / Σ(injeção_h) − PLD_médio
+#                        Sinal: positivo = bom (a usina captura acima da média).
+#
+#   "garantia_fisica"  → custo de modulação referenciado à garantia física.
+#                        mod = PLD_médio − Σ(injeção_h × PLD_h) / energia_GF
+#                        Sinal: positivo = custo (captura abaixo da média).
+#
+# O modo "energia" é o padrão atual; "garantia_fisica" preserva o cálculo legado.
+MODULATION_MODE_ENERGIA: str = "energia"
+MODULATION_MODE_GARANTIA_FISICA: str = "garantia_fisica"
+VALID_MODULATION_MODES: frozenset[str] = frozenset(
+    {MODULATION_MODE_ENERGIA, MODULATION_MODE_GARANTIA_FISICA}
+)
+DEFAULT_MODULATION_MODE: str = MODULATION_MODE_ENERGIA
+
+# ---------------------------------------------------------------------------
 # MUST reduction optimizer (feature 003)
 # ---------------------------------------------------------------------------
 
@@ -341,6 +363,7 @@ class SimulationParams:
     curtailment_target_pct_2025: float = DEFAULT_CURTAILMENT_TARGET_PCT_2025
     curtailment_assumption_pct_2026: float = CURTAILMENT_ASSUMPTION_PCT_2026
     gf_daily_coverage_target_pct: float | None = DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
+    modulation_mode: str = DEFAULT_MODULATION_MODE
 
     def __post_init__(self) -> None:
         """Validate MUST/TUST optimizer fields against documented bounds.
@@ -351,6 +374,11 @@ class SimulationParams:
             If ``tust_brl_per_kw_month``, ``must_sweep_max_pct`` or
             ``must_sweep_step_pct`` fall outside ``PARAM_BOUNDS``.
         """
+        if self.modulation_mode not in VALID_MODULATION_MODES:
+            raise ValueError(
+                f"ERRO: modulation_mode={self.modulation_mode!r} inválido; "
+                f"use um de {sorted(VALID_MODULATION_MODES)}."
+            )
         for field_name, value in (
             ("tust_brl_per_kw_month", self.tust_brl_per_kw_month),
             ("must_sweep_max_pct", self.must_sweep_max_pct),

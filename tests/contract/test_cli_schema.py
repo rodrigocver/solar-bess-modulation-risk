@@ -63,10 +63,11 @@ class TestCT02OutOfBounds:
         from solar_bess_risk.cli import run_session
 
         # Sequence: csv, defaults through coverage, decline defaults, MWac,
-        # submarket, usd=999(OOB), valid, then remaining defaults.
+        # submarket, usd=999(OOB), valid, then remaining defaults
+        # (rte, life, o&m, lcoe, charge_mode, modulation_mode, curt2026).
         inputs = [
             valid_csv, "", "", "n", "100", "", "999", "5.7",
-            "", "", "", "", "", "",
+            "", "", "", "", "", "", "",
         ]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
@@ -83,8 +84,9 @@ class TestCT03NonNumeric:
         from solar_bess_risk.cli import run_session
 
         # Sequence: csv, defaults through coverage, decline defaults,
-        # MWac=abc then 100, rest defaults.
-        inputs = [valid_csv, "", "", "n", "abc", "100", "", "", "", "", "", "", "", ""]
+        # MWac=abc then 100, rest defaults
+        # (submarket, usd, rte, life, o&m, lcoe, charge_mode, modulation_mode, curt2026).
+        inputs = [valid_csv, "", "", "n", "abc", "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 
@@ -210,8 +212,9 @@ class TestCT10MWacNonPositive:
         from solar_bess_risk.cli import run_session
 
         # Sequence: csv, defaults through coverage, decline defaults,
-        # mwac=0, mwac=-5, mwac=100, then remaining defaults.
-        inputs = [valid_csv, "", "", "n", "0", "-5", "100", "", "", "", "", "", "", "", ""]
+        # mwac=0, mwac=-5, mwac=100, then remaining defaults
+        # (submarket, usd, rte, life, o&m, lcoe, charge_mode, modulation_mode, curt2026).
+        inputs = [valid_csv, "", "", "n", "0", "-5", "100", "", "", "", "", "", "", "", "", ""]
         with patch("builtins.input", side_effect=inputs):
             params, _, _, _ = run_session()
 

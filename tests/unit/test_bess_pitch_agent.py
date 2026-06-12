@@ -70,18 +70,18 @@ def test_equilibrium_modulation_displays_without_bess_value_for_base_scenario():
     scenario = dados["2025_base"]
     assert scenario["fator_pld_descarga_equilibrio"] == pytest.approx(2.0)
     assert scenario["caixa_equilibrio_mm"] == pytest.approx(0.001)
-    assert scenario["mod_equilibrio_brl_mwh"] == pytest.approx(191.6666667)
-    assert scenario["mod_equilibrio_com_bess_brl_mwh"] == pytest.approx(187.5)
-    assert scenario["delta_mod_equilibrio_brl_mwh"] == pytest.approx(4.1666667)
-    assert scenario["mod_equilibrio_inteira"] == 192
+    assert scenario["mod_equilibrio_brl_mwh"] == pytest.approx(0.0)
+    assert scenario["mod_equilibrio_com_bess_brl_mwh"] == pytest.approx(0.0)
+    assert scenario["delta_mod_equilibrio_brl_mwh"] == pytest.approx(0.0)
+    assert scenario["mod_equilibrio_inteira"] == 0
 
 
 def test_equilibrium_modulation_accounts_for_must_savings():
     data = (
-        _dispatch(injection_com=[0.0, 10.0], discharge=[0.0, 10.0]),
+        _dispatch(injection_com=[10.0, 10.0], discharge=[0.0, 10.0]),
         np.array([100.0, 100.0]),
         10.0,
-        np.array([0.0, 0.0]),
+        np.array([10.0, 0.0]),
         frozenset({1}),
         4,
         2025,
@@ -105,8 +105,8 @@ def test_equilibrium_modulation_accounts_for_must_savings():
     scenario = dados["2025_must"]
     assert scenario["fator_pld_descarga_equilibrio"] == pytest.approx(2.0)
     assert scenario["caixa_equilibrio_mm"] == pytest.approx(0.003)
-    assert scenario["mod_equilibrio_brl_mwh"] == pytest.approx(200.0)
-    assert scenario["mod_equilibrio_com_bess_brl_mwh"] == pytest.approx(100.0)
+    assert scenario["mod_equilibrio_brl_mwh"] == pytest.approx(0.0)
+    assert scenario["mod_equilibrio_com_bess_brl_mwh"] == pytest.approx(0.0)
 
 
 def test_pitch_html_renders_equilibrium_modulation_column(tmp_path):
@@ -138,7 +138,7 @@ def test_pitch_html_renders_equilibrium_modulation_column(tmp_path):
     bess_pitch_agent.gerar_html_apresentacao(dados, path)
 
     html = path.read_text(encoding="utf-8")
-    assert "Modulação de Equilíbrio s/ BESS" in html
+    assert "Spread de Equilíbrio s/ BESS" in html
     assert "R$ 35/MWh" in html
     assert "PLD dias c/ descarga × 1.75" in html
 
@@ -195,8 +195,8 @@ def test_cross_curtailment_scenarios_render_in_section_four(tmp_path):
         {"2025 com curtailment de 2026": data},
     )
     cenario = dados["curtailment_cruzado"][0]
-    assert cenario["mod_original_inteira"] == 100
-    assert cenario["mod_com_bess_inteira"] == 96
+    assert cenario["mod_original_inteira"] == 0
+    assert cenario["mod_com_bess_inteira"] == 0
     assert cenario["caixa_adicionado_mm"] == pytest.approx(0.001)
     assert cenario["curtailment_recuperado"] == "60%"
     assert cenario["delta_cvar_dia_mil"] == pytest.approx(1.5)
@@ -288,4 +288,7 @@ def test_simplified_pitch_renders_fixed_must_as_separate_modulation_section(tmp_
     assert html.count("2025 — Modulação Existente") == 2
     assert html.count("2025 — Estressado") == 2
     assert html.count("2025 — Leve") == 2
+    assert "Spread s/ BESS" in html
+    assert "R$ -75/MWh" in html
+    assert "R$ -30/MWh" in html
     assert "Caixa Adicionado Total inclui" in html

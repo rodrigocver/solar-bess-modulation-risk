@@ -16,11 +16,14 @@ from solar_bess_risk.config import (
     DEFAULT_CURTAILMENT_TARGET_PCT_2025,
     DEFAULT_CURTAILMENT_TARGET_PCT_2026,
     DEFAULT_LCOE_DISCOUNT_RATE,
+    DEFAULT_MODULATION_MODE,
     DEFAULT_PLD_FACTOR_2026,
     DEFAULT_RTE_PATH,
     DEFAULT_USD_BRL_RATE,
     DEFAULT_USEFUL_LIFE_YR,
     HOURS_PER_YEAR,
+    MODULATION_MODE_ENERGIA,
+    MODULATION_MODE_GARANTIA_FISICA,
     PARAM_BOUNDS,
     VALID_BQ_SUBMARKETS,
     SimulationParams,
@@ -202,6 +205,40 @@ def _prompt_rte_path(default: str = DEFAULT_RTE_PATH) -> str:
     return raw if raw else default
 
 
+def _prompt_modulation_mode(default: str = DEFAULT_MODULATION_MODE) -> str:
+    """Prompt for how the modulação metric is computed.
+
+    Returns
+    -------
+    str
+        ``MODULATION_MODE_ENERGIA`` or ``MODULATION_MODE_GARANTIA_FISICA``.
+        Defaults to ``default`` when the user just presses Enter.
+    """
+    print()
+    print("  Cálculo da modulação:")
+    print()
+    print("    [energia] Prêmio de Captura por Energia  (Recomendado)")
+    print("        Modulação ponderada pela energia injetada:")
+    print("        Σ(injeção × PLD) / Σ(injeção) − PLD_médio.")
+    print("        Sinal: positivo = bom (captura acima da média).")
+    print()
+    print("    [gf] Custo de Modulação pela Garantia Física")
+    print("        Referênciado à obrigação de entrega (GF):")
+    print("        PLD_médio − Σ(injeção × PLD) / energia_GF.")
+    print("        Sinal: positivo = custo (captura abaixo da média).")
+    print()
+    default_label = "energia" if default == MODULATION_MODE_ENERGIA else "gf"
+    while True:
+        raw = input(f"  Selecione o modo [energia/gf] (padrão: {default_label}): ").strip().lower()
+        if raw == "":
+            return default
+        if raw in ("energia", "e"):
+            return MODULATION_MODE_ENERGIA
+        if raw in ("gf", "garantia", "garantia_fisica"):
+            return MODULATION_MODE_GARANTIA_FISICA
+        print("  ERRO: opção inválida. Digite 'energia' ou 'gf'.")
+
+
 def run_session(service_account_path: str | None = None) -> tuple:
     """Run the streamlined interactive parameter collection session.
 
@@ -249,6 +286,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     pld_factor_2026 = DEFAULT_PLD_FACTOR_2026
     curtailment_factor_2026 = DEFAULT_CURTAILMENT_FACTOR_2026
     curtailment_target_pct_2026 = DEFAULT_CURTAILMENT_TARGET_PCT_2026
+    modulation_mode = DEFAULT_MODULATION_MODE
 
     print("\n  ━━━ Demais parâmetros (padrão do projeto) ━━━")
     print(f"  Capacidade MWac:       {mwac:.0f}")
@@ -259,6 +297,8 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  O&M anual BESS:        {bess_om:.2%} do CAPEX")
     print(f"  Taxa LCOS/LCOE:        {lcoe_discount_rate:.1%} ao ano")
     print("  Modo BESS:             Arbitragem de PLD (modo 3)")
+    modul_label = "Energia (prêmio de captura)" if modulation_mode == MODULATION_MODE_ENERGIA else "Garantia física (custo)"
+    print(f"  Cálculo modulação:     {modul_label}")
     print(f"  Curtailment alvo 2026: {curtailment_target_pct_2026:.0f}% da geração")
 
     aceitar = input("\n  Seguir com o padrão? [S/n]: ").strip().lower()
@@ -278,6 +318,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
             "Taxa de retorno para LCOS/LCOE", "fração/ano", lcoe_discount_rate, lcoe_lo, lcoe_hi
         )
         charge_mode = _prompt_charge_mode()
+        modulation_mode = _prompt_modulation_mode(modulation_mode)
         ct26_lo, ct26_hi = PARAM_BOUNDS["curtailment_target_pct_2026"]
         curtailment_target_pct_2026 = _prompt_float(
             "Curtailment ONS alvo 2026", "% da geração",
@@ -316,6 +357,8 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print("  Curtailment:      Ativado")
     modo_label = "Arbitragem de PLD (modo 3)" if charge_mode == 3 else "Cobertura de Déficit (modo 0)"
     print(f"  Modo BESS:        {modo_label}")
+    modul_resumo = "Energia (prêmio de captura)" if modulation_mode == MODULATION_MODE_ENERGIA else "Garantia física (custo)"
+    print(f"  Cálculo modulação: {modul_resumo}")
     print(f"  Arquivo RTE:      {rte_path}")
     if rte_preview:
         first_yr = min(rte_preview)
@@ -357,5 +400,6 @@ def run_session(service_account_path: str | None = None) -> tuple:
         curtailment_target_pct_2026=curtailment_target_pct_2026,
         curtailment_target_pct_2025=curtailment_target_pct_2025,
         gf_daily_coverage_target_pct=gf_daily_coverage_target_pct,
+        modulation_mode=modulation_mode,
     )
     return params, curtailment_enabled, rte_path, charge_mode

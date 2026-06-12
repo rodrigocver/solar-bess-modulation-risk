@@ -4,6 +4,12 @@ import numpy as np
 import numpy_financial as npf
 from bs4 import BeautifulSoup
 
+from solar_bess_risk.config import (
+    DEFAULT_MODULATION_MODE,
+    MODULATION_MODE_ENERGIA,
+)
+from solar_bess_risk.modulation import modulation_value_brl_per_mwh
+
 # Piso e teto regulatórios do PLD (R$/MWh). Usados para clampar o PLD escalado
 # ao estressar/relaxar a modulação no dashboard simplificado.
 PLD_FLOOR_BRL_PER_MWH = 57.31
@@ -147,12 +153,32 @@ def calcular_premio_seguro(dados):
     
     return dados
 
-def _modulation_value_brl_per_mwh(injection_mwh, pld_brl_per_mwh, gf_energy_mwh):
-    """Calcula modulação referenciada à energia de garantia física."""
-    if gf_energy_mwh <= 1e-10:
-        return None
-    captured_vs_gf = float(np.sum(injection_mwh * pld_brl_per_mwh) / gf_energy_mwh)
-    return float(np.mean(pld_brl_per_mwh) - captured_vs_gf)
+def _modulation_value_brl_per_mwh(
+    injection_mwh,
+    pld_brl_per_mwh,
+    gf_energy_mwh,
+    mode=DEFAULT_MODULATION_MODE,
+):
+    """Calcula a modulação usando a implementação central do projeto."""
+    return modulation_value_brl_per_mwh(
+        injection_mwh,
+        pld_brl_per_mwh,
+        gf_energy_mwh,
+        mode,
+    )
+
+
+def _target_modulation_for_mode(target_cost_brl_mwh, mode=DEFAULT_MODULATION_MODE):
+    """Translate legacy cost targets into the selected modulation convention."""
+    if mode == MODULATION_MODE_ENERGIA:
+        return -float(target_cost_brl_mwh)
+    return float(target_cost_brl_mwh)
+
+
+def _modulation_mode_label(mode=DEFAULT_MODULATION_MODE):
+    if mode == MODULATION_MODE_ENERGIA:
+        return "Spread de captura"
+    return "Custo de modulação"
 
 def _duration_from_scenario_name(name):
     match = re.search(r'(\d+)\s*h', name or '', flags=re.IGNORECASE)
@@ -193,7 +219,7 @@ def _daily_price_scale_mask(discharge_mwh, hours_per_day=24):
 
     return mask
 
-def _equilibrium_for_result_data(data, premium_brl):
+def _equilibrium_for_result_data(data, premium_brl, mode=DEFAULT_MODULATION_MODE):
     dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
     tust_savings_brl = data[11] if len(data) > 11 and data[11] is not None else 0.0
 
@@ -227,11 +253,13 @@ def _equilibrium_for_result_data(data, premium_brl):
         injection_sem,
         pld_equilibrium,
         gf_energy,
+        mode,
     )
     mod_with_bess_equilibrium = _modulation_value_brl_per_mwh(
         injection_com,
         pld_equilibrium,
         gf_energy,
+        mode,
     )
     cash_equilibrium_brl = float(np.sum(delta_injection * pld_equilibrium)) + tust_savings_brl
 
@@ -254,7 +282,7 @@ def _equilibrium_for_result_data(data, premium_brl):
         'caixa_equilibrio_mm': cash_equilibrium_brl / 1e6,
     }
 
-def _scenario_metrics_from_result_data(label, data):
+def _scenario_metrics_from_result_data(label, data, mode=DEFAULT_MODULATION_MODE):
     dispatch, pld, gf, gen = data[0], data[1], data[2], data[3]
     risk_metrics = data[10] if len(data) > 10 and isinstance(data[10], dict) else None
     tust_savings_brl = data[11] if len(data) > 11 and data[11] is not None else 0.0
@@ -265,8 +293,8 @@ def _scenario_metrics_from_result_data(label, data):
     injection_com = np.asarray(dispatch.grid_injection_mwh, dtype=np.float64)
 
     gf_energy = float(gf) * len(pld_arr)
-    mod_original = _modulation_value_brl_per_mwh(injection_sem, pld_arr, gf_energy)
-    mod_com_bess = _modulation_value_brl_per_mwh(injection_com, pld_arr, gf_energy)
+    mod_original = _modulation_value_brl_per_mwh(injection_sem, pld_arr, gf_energy, mode)
+    mod_com_bess = _modulation_value_brl_per_mwh(injection_com, pld_arr, gf_energy, mode)
     net_sem = float(np.sum((injection_sem - float(gf)) * pld_arr))
     net_com = float(np.sum((injection_com - float(gf)) * pld_arr))
     caixa_adicionado = (net_com - net_sem + tust_savings_brl) / 1e6
@@ -313,6 +341,7 @@ def _scale_pld_to_target_modulation(
     injection_sem,
     gf_energy,
     target_brl_per_mwh,
+    mode=DEFAULT_MODULATION_MODE,
     pld_floor=PLD_FLOOR_BRL_PER_MWH,
     pld_ceil=PLD_CEILING_BRL_PER_MWH,
 ):
@@ -328,35 +357,44 @@ def _scale_pld_to_target_modulation(
 
     def mod_for_factor(k):
         scaled = np.clip(pld_arr * k, pld_floor, pld_ceil)
-        return _modulation_value_brl_per_mwh(injection_sem, scaled, gf_energy)
+        return _modulation_value_brl_per_mwh(injection_sem, scaled, gf_energy, mode)
 
     base_mod = mod_for_factor(1.0)
     if base_mod is None:
         return pld_arr.copy()
 
-    # Garante o bracketing [k_lo, k_hi] tal que mod(k_lo) <= alvo <= mod(k_hi).
+    # Garante um bracketing com monotonicidade detectada empiricamente.
     k_lo, k_hi = 0.0, 1.0
+    mod_lo = mod_for_factor(k_lo)
     mod_hi = mod_for_factor(k_hi)
+    if mod_lo is None or mod_hi is None:
+        return pld_arr.copy()
+
+    increasing = mod_hi >= mod_lo
+
+    def _target_bracketed(lo_value, hi_value):
+        low, high = sorted((lo_value, hi_value))
+        return low <= target_brl_per_mwh <= high
+
     iters = 0
-    while mod_hi is not None and mod_hi < target_brl_per_mwh and k_hi < 1e6 and iters < 200:
+    while not _target_bracketed(mod_lo, mod_hi) and k_hi < 1e6 and iters < 200:
         k_hi *= 2.0
         mod_hi = mod_for_factor(k_hi)
+        if mod_hi is None:
+            return pld_arr.copy()
         iters += 1
 
-    mod_lo = mod_for_factor(k_lo)
-    if mod_lo is not None and mod_lo > target_brl_per_mwh:
-        # Alvo abaixo do mínimo alcançável (PLD todo no piso): melhor esforço.
-        return np.clip(pld_arr * k_lo, pld_floor, pld_ceil)
-    if mod_hi is not None and mod_hi < target_brl_per_mwh:
-        # Alvo acima do máximo alcançável (PLD todo no teto): melhor esforço.
-        return np.clip(pld_arr * k_hi, pld_floor, pld_ceil)
+    if not _target_bracketed(mod_lo, mod_hi):
+        # Alvo fora do intervalo alcançável: retorna o extremo mais próximo.
+        k_best = k_lo if abs(mod_lo - target_brl_per_mwh) <= abs(mod_hi - target_brl_per_mwh) else k_hi
+        return np.clip(pld_arr * k_best, pld_floor, pld_ceil)
 
     for _ in range(80):
         k_mid = 0.5 * (k_lo + k_hi)
         mod_mid = mod_for_factor(k_mid)
         if mod_mid is None:
             break
-        if mod_mid < target_brl_per_mwh:
+        if (mod_mid < target_brl_per_mwh) == increasing:
             k_lo = k_mid
         else:
             k_hi = k_mid
@@ -373,7 +411,13 @@ def _clean_must_label(label):
     )
 
 
-def _build_modulation_cases(base, premium_brl, *, existing_description):
+def _build_modulation_cases(
+    base,
+    premium_brl,
+    *,
+    existing_description,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Build the three simplified modulation cases for an already simulated dispatch."""
     dispatch, pld, gf, gen = base[0], base[1], base[2], base[3]
     injection_sem = (
@@ -386,14 +430,24 @@ def _build_modulation_cases(base, premium_brl, *, existing_description):
         data = list(base)
         data[1] = scaled_pld
         data = tuple(data)
-        metrics = _scenario_metrics_from_result_data(label, data)
+        metrics = _scenario_metrics_from_result_data(label, data, mode)
         metrics["titulo"] = label
         metrics["descricao"] = descricao
         if premium_brl > 0:
-            equilibrium = _equilibrium_for_result_data(data, premium_brl)
+            equilibrium = _equilibrium_for_result_data(data, premium_brl, mode)
             if equilibrium:
                 metrics.update(equilibrium)
         return metrics
+
+    stressed_target = _target_modulation_for_mode(
+        MODULACAO_ALVO_ESTRESSADO_BRL_MWH,
+        mode,
+    )
+    light_target = _target_modulation_for_mode(
+        MODULACAO_ALVO_LEVE_BRL_MWH,
+        mode,
+    )
+    metric_label = _modulation_mode_label(mode)
 
     cenarios = [
         _make(
@@ -403,23 +457,27 @@ def _build_modulation_cases(base, premium_brl, *, existing_description):
         ),
         _make(
             "2025 — Estressado",
-            f"Modulação s/ BESS escalada p/ R$ {MODULACAO_ALVO_ESTRESSADO_BRL_MWH:.0f}/MWh",
+            f"{metric_label} s/ BESS escalado p/ R$ {stressed_target:.0f}/MWh",
             _scale_pld_to_target_modulation(
-                pld, injection_sem, gf_energy, MODULACAO_ALVO_ESTRESSADO_BRL_MWH
+                pld, injection_sem, gf_energy, stressed_target, mode
             ),
         ),
         _make(
             "2025 — Leve",
-            f"Modulação s/ BESS escalada p/ R$ {MODULACAO_ALVO_LEVE_BRL_MWH:.0f}/MWh",
+            f"{metric_label} s/ BESS escalado p/ R$ {light_target:.0f}/MWh",
             _scale_pld_to_target_modulation(
-                pld, injection_sem, gf_energy, MODULACAO_ALVO_LEVE_BRL_MWH
+                pld, injection_sem, gf_energy, light_target, mode
             ),
         ),
     ]
     return cenarios
 
 
-def _build_simplified_scenarios(results_by_key, premium_brl):
+def _build_simplified_scenarios(
+    results_by_key,
+    premium_brl,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Constrói os 3 cenários 2025 sem redução de MUST."""
     base = _select_result_data(results_by_key, 2025, 4)
     if base is None:
@@ -431,10 +489,15 @@ def _build_simplified_scenarios(results_by_key, premium_brl):
         base,
         premium_brl,
         existing_description="PLD realizado 2025 · ONS no alvo configurado",
+        mode=mode,
     )
 
 
-def _build_simplified_must_scenarios(must_reduction_by_key, premium_brl):
+def _build_simplified_must_scenarios(
+    must_reduction_by_key,
+    premium_brl,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Constrói os 3 cenários 2025 para o dispatch com MUST reduzido/definido."""
     must_match = _select_labeled_result_data(must_reduction_by_key, 2025, 4)
     if must_match is None:
@@ -448,19 +511,24 @@ def _build_simplified_must_scenarios(must_reduction_by_key, premium_brl):
         data,
         premium_brl,
         existing_description=f"{clean_label} · PLD realizado 2025",
+        mode=mode,
     )
     return scenarios, section_label, clean_label
 
 
-def adicionar_cenarios_curtailment_cruzado(dados, results_by_key):
+def adicionar_cenarios_curtailment_cruzado(
+    dados,
+    results_by_key,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Adiciona cenários sem MUST com PLD de um ano e curtailment do outro."""
     premium_brl = dados.get('premio_anual_seguro_mm', 0.0) * 1e6
     cenarios = []
 
     for label, data in (results_by_key or {}).items():
-        scenario_data = _scenario_metrics_from_result_data(label, data)
+        scenario_data = _scenario_metrics_from_result_data(label, data, mode)
         if premium_brl > 0:
-            equilibrium = _equilibrium_for_result_data(data, premium_brl)
+            equilibrium = _equilibrium_for_result_data(data, premium_brl, mode)
             if equilibrium:
                 scenario_data.update(equilibrium)
         cenarios.append(scenario_data)
@@ -468,7 +536,12 @@ def adicionar_cenarios_curtailment_cruzado(dados, results_by_key):
     dados['curtailment_cruzado'] = cenarios
     return dados
 
-def adicionar_modulacao_equilibrio(dados, results_by_key, must_reduction_by_key=None):
+def adicionar_modulacao_equilibrio(
+    dados,
+    results_by_key,
+    must_reduction_by_key=None,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Adiciona a modulação que faz o caixa anual igualar o prêmio.
 
     A simulação fica congelada. O PLD de todas as horas dos dias em que a BESS
@@ -496,13 +569,13 @@ def adicionar_modulacao_equilibrio(dados, results_by_key, must_reduction_by_key=
         if result_data is None:
             continue
 
-        equilibrium = _equilibrium_for_result_data(result_data, premium_brl)
+        equilibrium = _equilibrium_for_result_data(result_data, premium_brl, mode)
         if equilibrium:
             scenario_data.update(equilibrium)
 
     return dados
 
-def gerar_html_apresentacao(dados, caminho_saida):
+def gerar_html_apresentacao(dados, caminho_saida, mode=DEFAULT_MODULATION_MODE):
     
     # Cabeçalho Técnico (Inteiros)
     nome_proj = dados.get('nome_projeto', 'PROJETO SOLAR')
@@ -539,6 +612,8 @@ def gerar_html_apresentacao(dados, caminho_saida):
         if value is None:
             return "PLD dias c/ descarga n/a"
         return f"PLD dias c/ descarga × {value:.2f}"
+
+    metric_table_label = "Spread" if mode == MODULATION_MODE_ENERGIA else "Modulação"
 
     def format_scenario_row(cenario, badge_class):
         nome = cenario.get('nome', '-')
@@ -587,9 +662,9 @@ def gerar_html_apresentacao(dados, caminho_saida):
                 <tr>
                     <th style="width: 20%; text-align: left;">Cenário Cruzado</th>
                     <th>Prêmio Pago</th>
-                    <th>Modulação s/ BESS</th>
-                    <th>Modulação c/ BESS</th>
-                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>{metric_table_label} s/ BESS</th>
+                    <th>{metric_table_label} c/ BESS</th>
+                    <th>{metric_table_label} de Equilíbrio s/ BESS</th>
                     <th>Curtailment ONS / Geração</th>
                     <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
@@ -745,9 +820,9 @@ def gerar_html_apresentacao(dados, caminho_saida):
                 <tr>
                     <th style="width: 20%; text-align: left;">Cenário Base</th>
                     <th>Prêmio Pago</th>
-                    <th>Modulação s/ BESS</th>
-                    <th>Modulação c/ BESS</th>
-                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>{metric_table_label} s/ BESS</th>
+                    <th>{metric_table_label} c/ BESS</th>
+                    <th>{metric_table_label} de Equilíbrio s/ BESS</th>
                     <th>Curtailment ONS / Geração</th>
                     <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
@@ -789,7 +864,7 @@ def gerar_html_apresentacao(dados, caminho_saida):
             </tbody>
         </table>
         <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
-            Modulação de Equilíbrio s/ BESS: valor da modulação original recalculado aplicando um fator linear ao PLD de todas as horas dos dias em que a BESS descarrega, mantendo o despacho original, até o Caixa Adicionado Total igualar o Prêmio Anual Total.
+            {metric_table_label} de Equilíbrio s/ BESS: valor original recalculado aplicando um fator linear ao PLD de todas as horas dos dias em que a BESS descarrega, mantendo o despacho original, até o Caixa Adicionado Total igualar o Prêmio Anual Total.
         </p>
     </div>
 
@@ -800,9 +875,9 @@ def gerar_html_apresentacao(dados, caminho_saida):
                 <tr>
                     <th style="width: 20%; text-align: left;">Cenário Otimizado</th>
                     <th>Prêmio Pago</th>
-                    <th>Modulação s/ BESS</th>
-                    <th>Modulação c/ BESS</th>
-                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>{metric_table_label} s/ BESS</th>
+                    <th>{metric_table_label} c/ BESS</th>
+                    <th>{metric_table_label} de Equilíbrio s/ BESS</th>
                     <th>Curtailment ONS / Geração</th>
                     <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
@@ -859,7 +934,13 @@ def gerar_html_apresentacao(dados, caminho_saida):
         f.write(html_content)
 
 
-def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction_by_key=None):
+def gerar_html_simplificado(
+    dados,
+    caminho_saida,
+    results_by_key,
+    must_reduction_by_key=None,
+    mode=DEFAULT_MODULATION_MODE,
+):
     """Gera um dashboard simplificado com prêmio e cenários de modulação 2025.
 
     Quadro 1: cálculo do prêmio anual de seguro (idêntico ao pitch completo).
@@ -880,13 +961,18 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction
     wacc_pct = dados.get('wacc_utilizado_pct', 0.0)
 
     premium_brl = premio * 1e6
-    cenarios = _build_simplified_scenarios(results_by_key, premium_brl)
+    cenarios = _build_simplified_scenarios(results_by_key, premium_brl, mode)
     must_cenarios, must_section_label, must_description = (
         _build_simplified_must_scenarios(
             must_reduction_by_key,
             premium_brl,
+            mode,
         )
     )
+    metric_label = _modulation_mode_label(mode)
+    metric_table_label = "Spread" if mode == MODULATION_MODE_ENERGIA else "Modulação"
+    stressed_target = _target_modulation_for_mode(MODULACAO_ALVO_ESTRESSADO_BRL_MWH, mode)
+    light_target = _target_modulation_for_mode(MODULACAO_ALVO_LEVE_BRL_MWH, mode)
 
     def _mod_eq_value(cenario):
         value = cenario.get('mod_equilibrio_brl_mwh')
@@ -940,9 +1026,9 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction
                 <tr>
                     <th style="width: 20%; text-align: left;">Cenário 2025</th>
                     <th>Prêmio Pago</th>
-                    <th>Modulação s/ BESS</th>
-                    <th>Modulação c/ BESS</th>
-                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>{metric_table_label} s/ BESS</th>
+                    <th>{metric_table_label} c/ BESS</th>
+                    <th>{metric_table_label} de Equilíbrio s/ BESS</th>
                     <th>Curtailment ONS / Geração</th>
                     <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
@@ -1099,9 +1185,9 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction
                 <tr>
                     <th style="width: 20%; text-align: left;">Cenário 2025</th>
                     <th>Prêmio Pago</th>
-                    <th>Modulação s/ BESS</th>
-                    <th>Modulação c/ BESS</th>
-                    <th>Modulação de Equilíbrio s/ BESS</th>
+                    <th>{metric_table_label} s/ BESS</th>
+                    <th>{metric_table_label} c/ BESS</th>
+                    <th>{metric_table_label} de Equilíbrio s/ BESS</th>
                     <th>Curtailment ONS / Geração</th>
                     <th>Clipping / Geração</th>
                     <th>Curtailment Recuperado</th>
@@ -1116,7 +1202,7 @@ def gerar_html_simplificado(dados, caminho_saida, results_by_key, must_reduction
         <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
             Cenários estressado e leve mantêm o despacho de 2025 e escalam o PLD por um fator uniforme,
             limitado ao piso (R$ {PLD_FLOOR_BRL_PER_MWH:.2f}/MWh) e ao teto (R$ {PLD_CEILING_BRL_PER_MWH:.2f}/MWh),
-            até a modulação s/ BESS atingir R$ {MODULACAO_ALVO_ESTRESSADO_BRL_MWH:.0f}/MWh e R$ {MODULACAO_ALVO_LEVE_BRL_MWH:.0f}/MWh, respectivamente.
+            até o {metric_label.lower()} s/ BESS atingir R$ {stressed_target:.0f}/MWh e R$ {light_target:.0f}/MWh, respectivamente.
         </p>
     </div>
 
