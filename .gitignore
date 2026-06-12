@@ -25,6 +25,7 @@ output/
 Thumbs.db
 *.tmp
 *.swp
+*:Zone.Identifier
 
 # Environment
 .env*
