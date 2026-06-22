@@ -1189,7 +1189,7 @@ def main() -> None:
 
         print(f"  [PPA Modulação] Calculando modulação do contrato flat "
               f"({p90_year20_mwmed:.1f} MWmed)...")
-        ppa_csv, ppa_flat, ppa_sazo = run_ppa_modulation_report(
+        ppa_csv, ppa_flat = run_ppa_modulation_report(
             solar,
             p90_year20_mwmed,
             output_dir,
@@ -1197,7 +1197,6 @@ def main() -> None:
             params=params,
         )
         print(f"  [PPA Modulação] flat_anual: {ppa_flat}")
-        print(f"  [PPA Modulação] sazonalizado: {ppa_sazo}")
     except Exception as e:
         print(f"  [Aviso PPA Modulação] Não foi possível gerar o report: {e}")
     # =========================================================================

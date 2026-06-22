@@ -27,8 +27,7 @@ fisica, despacho price-aware charge_mode 3, RTE Envision por ano).
 
 Saidas em output/modulacao_contrato/:
   - CSV anual (ambas as convencoes, sem/com BESS);
-  - HTML flat anual;
-  - HTML sazonalizado.
+  - HTML flat anual.
 """
 
 from __future__ import annotations
@@ -208,10 +207,10 @@ def run_ppa_modulation_report(
     rte_table: dict[int, float] | None = None,
     params=None,
 ) -> tuple[Path, Path, Path]:
-    """Compute PPA modulation report (flat + sazonalizado) and write outputs.
+    """Compute PPA modulation report (flat anual) and write outputs.
 
     Callable by the main pipeline after solar and RTE are already loaded.
-    Returns (csv_path, flat_html_path, sazo_html_path).
+    Returns (csv_path, flat_html_path).
     """
     if solar.generation_years_lim_mw is None:
         raise ValueError("CSV solar precisa ser multi-ano (gen_lim_mw).")
@@ -296,14 +295,9 @@ def run_ppa_modulation_report(
         .mean()
     )
     flat_html = output_dir / f"{slug}_flat_anual.html"
-    sazo_html = output_dir / f"{slug}_sazonalizado.html"
     _write_report_html(
         df, summary, flat_html, contract_mw, gf, base_scenario,
         convention="flat", years=years,
-    )
-    _write_report_html(
-        df, summary, sazo_html, contract_mw, gf, base_scenario,
-        convention="sazo", years=years,
     )
 
     sem = summary.loc["sem BESS"]
@@ -313,7 +307,7 @@ def run_ppa_modulation_report(
         f"→ com BESS={com.mod_flat_brl_mwh:.1f} R$/MWh "
         f"(redução {sem.mod_flat_brl_mwh - com.mod_flat_brl_mwh:.1f})"
     )
-    return csv_path, flat_html, sazo_html
+    return csv_path, flat_html
 
 
 def main() -> None:
@@ -329,10 +323,10 @@ def main() -> None:
     rte_table = load_rte_table(RTE_PATH, commissioning_year=START_YEAR)
     params = SimulationParams(csv_path=str(solar_csv), mwac=mwac)
 
-    csv_path, flat_html, sazo_html = run_ppa_modulation_report(
+    csv_path, flat_html = run_ppa_modulation_report(
         solar, contract_mw, OUTPUT_DIR, rte_table=rte_table, params=params,
     )
-    print(f"\nSaidas:\n  {csv_path}\n  {flat_html}\n  {sazo_html}")
+    print(f"\nSaidas:\n  {csv_path}\n  {flat_html}")
 
 
 def _fmt(v: float, d: int = 2) -> str:
