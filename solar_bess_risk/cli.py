@@ -2,7 +2,8 @@
 
 Functions
 ---------
-run_session(service_account_path=None) -> SimulationParams
+run_session(service_account_path=None)
+    -> tuple[SimulationParams, bool, str, int, float]
 """
 
 from __future__ import annotations
@@ -280,19 +281,23 @@ def _prompt_modulation_mode(default: str = DEFAULT_MODULATION_MODE) -> str:
         print("  ERRO: opção inválida. Digite 'energia' ou 'gf'.")
 
 
-def run_session(service_account_path: str | None = None) -> tuple:
+def run_session(
+    service_account_path: str | None = None,
+) -> tuple[SimulationParams, bool, str, int, float]:
     """Run the streamlined interactive parameter collection session.
 
-    Only three questions are asked interactively: (1) solar CSV path,
-    (2) target ONS curtailment for 2025, and (3) desired GF daily coverage.
+    Only four questions are asked interactively: (1) solar CSV path,
+    (2) target ONS curtailment for 2025, (3) desired GF daily coverage, and
+    (4) P90 of year 20 for the flat PPA volume.
     Every other parameter is shown as a defaults block and accepted with a
     single confirmation (``Seguir com o padrão? [S/n]``). Answering ``n`` falls
     back to per-parameter prompts for the remaining defaults.
 
     Returns
     -------
-    tuple[SimulationParams, bool, str, int]
-        Parameters, whether curtailment is enabled, RTE file path, and charge_mode.
+    tuple[SimulationParams, bool, str, int, float]
+        Parameters, whether curtailment is enabled, RTE file path, charge mode,
+        and P90 of year 20 in average MW.
     """
     # ── Pergunta 1: caminho do CSV solar ─────────────────────────────────────
     csv_path = _prompt_csv_path()

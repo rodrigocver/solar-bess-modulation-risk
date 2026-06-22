@@ -257,7 +257,7 @@ class TestFullRun:
         assert "Modo de operacao" in content
         assert "Vida util economica" in content
         assert "Acum-" not in content
-        assert "-7.50" in content
+        assert ">7.50<" in content
         assert "Exposição s/ BESS (R$ MM/ano)" not in content
         assert "Saldo Diário s/ BESS" not in content
         assert "Saldo Diário c/ BESS" not in content

@@ -26,6 +26,7 @@ from solar_bess_risk.config import (
     CURTAILMENT_SHEET_2025,
     DEFAULT_MODULATION_MODE,
     HOURS_PER_YEAR,
+    MODULATION_MODE_ENERGIA,
 )
 from solar_bess_risk.modulation import modulation_value_brl_per_mwh
 from solar_bess_risk.simulation import DispatchResult
@@ -563,10 +564,8 @@ def _build_kpi_table(
         injection_sem = gen - dispatch.ons_curtailment_mwh
         injection_com = dispatch.grid_injection_mwh
 
-        # Modulação referenciada à garantia física (obrigação de entrega).
-        # custo = GF × PLD_médio − Σ(injeção × PLD), normalizado pela energia de GF.
-        # A energia injetada abate o custo; a referência é sempre a GF, não a injeção.
-        # Sem BESS: injection_sem; Com BESS: injection_com (despacho desloca entrega ao pico).
+        # The central modulation function applies either the current energy
+        # capture-premium convention or the legacy GF-referenced cost convention.
         gf_energy = gf * HOURS_PER_YEAR
         modulation_original = _modulation_value_brl_per_mwh(injection_sem, pld, gf_energy, modulation_mode)
         modulation_com_bess = _modulation_value_brl_per_mwh(injection_com, pld, gf_energy, modulation_mode)
@@ -660,15 +659,42 @@ def _build_kpi_table(
             <td>{lcos_str}</td>
         </tr>"""
 
+    if modulation_mode == MODULATION_MODE_ENERGIA:
+        modulation_original_title = (
+            "Prêmio de captura sem BESS: preço capturado ponderado pela energia "
+            "injetada menos o PLD médio. Positivo = captura acima da média."
+        )
+        modulation_with_bess_title = (
+            "Prêmio de captura com BESS: preço capturado ponderado pela energia "
+            "injetada menos o PLD médio. Positivo = captura acima da média."
+        )
+        modulation_delta_title = (
+            "Modulação com BESS menos modulação original. Positivo = melhora do "
+            "prêmio de captura."
+        )
+    else:
+        modulation_original_title = (
+            "Custo de modulação sem BESS: PLD médio menos receita horária "
+            "normalizada pela energia de garantia física."
+        )
+        modulation_with_bess_title = (
+            "Custo de modulação com BESS: PLD médio menos receita horária "
+            "normalizada pela energia de garantia física."
+        )
+        modulation_delta_title = (
+            "Modulação com BESS menos modulação original. Negativo = redução do "
+            "custo de modulação."
+        )
+
     return f"""<table class="kpi-table">
     <thead><tr>
         <th>Cenário</th>
         <th>Potência BESS (MW)</th>
         <th>Energia BESS (MWh)</th>
         <th title="CAPEX do BESS em milhões de reais dividido pela capacidade energética instalada.">CAPEX (R$ MM/MWh)</th>
-        <th title="Custo de modulação referenciado à garantia física, sem BESS: PLD médio − Σ(injeção sem BESS × PLD) / energia de GF.">Modulação Original (R$/MWh)</th>
-        <th title="Custo de modulação referenciado à garantia física, com BESS: PLD médio − Σ(injeção com BESS × PLD) / energia de GF.">Modulação c/ BESS (R$/MWh)</th>
-        <th title="Modulação c/ BESS menos modulação original. Negativo = BESS reduz o custo de modulação.">Δ Modulação (R$/MWh)</th>
+        <th title="{modulation_original_title}">Modulação Original (R$/MWh)</th>
+        <th title="{modulation_with_bess_title}">Modulação c/ BESS (R$/MWh)</th>
+        <th title="{modulation_delta_title}">Δ Modulação (R$/MWh)</th>
         <th title="Exposição sem BESS menos exposição com BESS. Positivo = redução de exposição.">Δ Exposição (R$ MM/ano)</th>
         <th title="Δ Exposição dividido pela exposição sem BESS.">Δ Exposição (%)</th>
         <th title="Saldo líquido com BESS menos saldo líquido sem BESS. Positivo = ganho financeiro líquido do BESS.">Δ Saldo Líquido (R$ MM/ano)</th>
