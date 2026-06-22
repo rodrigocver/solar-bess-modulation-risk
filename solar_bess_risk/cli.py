@@ -13,6 +13,7 @@ from solar_bess_risk.config import (
     DEFAULT_BQ_SUBMARKET,
     DEFAULT_BESS_O_AND_M_PCT_CAPEX,
     DEFAULT_CURTAILMENT_FACTOR_2026,
+    DEFAULT_CURTAILMENT_PATH,
     DEFAULT_CURTAILMENT_TARGET_PCT_2025,
     DEFAULT_CURTAILMENT_TARGET_PCT_2026,
     DEFAULT_LCOE_DISCOUNT_RATE,
@@ -34,8 +35,8 @@ from solar_bess_risk.rte import load_rte_table
 # ── Defaults fixos do projeto padrão ──────────────────────────────────────────
 DEFAULT_CSV_PATH = "solar/solar_baguacu_m2_600mw_id8.csv"
 DEFAULT_MWAC = 600.0
-# Cobertura diária da GF sugerida na CLI (20% — alinhado ao pitch padrão).
-DEFAULT_CLI_GF_DAILY_COVERAGE_PCT = 0.20
+# Cobertura diária da GF sugerida na CLI.
+DEFAULT_CLI_GF_DAILY_COVERAGE_PCT = 0.15
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -199,10 +200,50 @@ def _prompt_coverage_target() -> float | None:
         return frac
 
 
+DEFAULT_P90_YEAR20_MWMED: float = 155.0
+
+
+def _prompt_p90_year20(default: float = DEFAULT_P90_YEAR20_MWMED) -> float:
+    """Prompt for the P90 of year 20 (flat PPA contract volume in MWmed)."""
+    while True:
+        try:
+            raw = input(
+                f"  P90 do ano 20 do PPA (volume flat do contrato) "
+                f"[MWmed] (padrão {default:.1f}): "
+            ).strip().replace(",", ".")
+        except EOFError:
+            return default
+        if raw == "":
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            print(f"  ERRO: '{raw}' não é um número válido.")
+            continue
+        if value <= 0:
+            print("  ERRO: o valor deve ser maior que zero.")
+            continue
+        return value
+
+
 def _prompt_rte_path(default: str = DEFAULT_RTE_PATH) -> str:
     """Prompt for RTE Excel file path (confirmation of default)."""
     raw = input(f"  Caminho do arquivo RTE (padrão: {default}): ").strip()
     return raw if raw else default
+
+
+def _prompt_curtailment_path(default: str = DEFAULT_CURTAILMENT_PATH) -> str:
+    """Prompt for curtailment curve file path."""
+    while True:
+        try:
+            raw = input(f"  Caminho da curva de curtailment (padrão: {default}): ").strip()
+        except (EOFError, StopIteration):
+            return default
+        path = raw if raw else default
+        if not os.path.isfile(path):
+            print(f"  ERRO: Arquivo '{path}' não encontrado.")
+            continue
+        return path
 
 
 def _prompt_modulation_mode(default: str = DEFAULT_MODULATION_MODE) -> str:
@@ -274,11 +315,17 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print("  ── Dimensionamento do BESS ──")
     gf_daily_coverage_target_pct = _prompt_coverage_target()
 
+    # ── Pergunta 4: P90 do ano 20 (volume flat do PPA) ───────────────────────
+    print()
+    print("  ── Contrato PPA ──")
+    p90_year20_mwmed = _prompt_p90_year20()
+
     # ── Defaults do projeto padrão (apresentados de uma vez) ─────────────────
     mwac = DEFAULT_MWAC
     bq_submarket = DEFAULT_BQ_SUBMARKET
     usd_brl = DEFAULT_USD_BRL_RATE
     rte_path = DEFAULT_RTE_PATH
+    curtailment_path = DEFAULT_CURTAILMENT_PATH
     useful_life = DEFAULT_USEFUL_LIFE_YR
     bess_om = DEFAULT_BESS_O_AND_M_PCT_CAPEX
     lcoe_discount_rate = DEFAULT_LCOE_DISCOUNT_RATE
@@ -293,6 +340,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Submercado BQ:         {bq_submarket}")
     print(f"  Taxa câmbio USD/BRL:   {usd_brl}")
     print(f"  Arquivo RTE:           {rte_path}")
+    print(f"  Curva curtailment:     {curtailment_path}")
     print(f"  Vida útil:             {useful_life} anos")
     print(f"  O&M anual BESS:        {bess_om:.2%} do CAPEX")
     print(f"  Taxa LCOS/LCOE:        {lcoe_discount_rate:.1%} ao ano")
@@ -324,6 +372,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
             "Curtailment ONS alvo 2026", "% da geração",
             curtailment_target_pct_2026, ct26_lo, ct26_hi,
         )
+        curtailment_path = _prompt_curtailment_path(curtailment_path)
 
     # Carrega e valida CSV imediatamente para mostrar fc/garantia_fisica
     try:
@@ -355,6 +404,7 @@ def run_session(service_account_path: str | None = None) -> tuple:
     print(f"  Submercado:       {bq_submarket}")
     print(f"  USD/BRL:          {usd_brl}")
     print("  Curtailment:      Ativado")
+    print(f"  Curva curt.:      {curtailment_path}")
     modo_label = "Arbitragem de PLD (modo 3)" if charge_mode == 3 else "Cobertura de Déficit (modo 0)"
     print(f"  Modo BESS:        {modo_label}")
     modul_resumo = "Energia (prêmio de captura)" if modulation_mode == MODULATION_MODE_ENERGIA else "Garantia física (custo)"
@@ -399,7 +449,8 @@ def run_session(service_account_path: str | None = None) -> tuple:
         curtailment_factor_2026=curtailment_factor_2026,
         curtailment_target_pct_2026=curtailment_target_pct_2026,
         curtailment_target_pct_2025=curtailment_target_pct_2025,
+        curtailment_path=curtailment_path,
         gf_daily_coverage_target_pct=gf_daily_coverage_target_pct,
         modulation_mode=modulation_mode,
     )
-    return params, curtailment_enabled, rte_path, charge_mode
+    return params, curtailment_enabled, rte_path, charge_mode, p90_year20_mwmed

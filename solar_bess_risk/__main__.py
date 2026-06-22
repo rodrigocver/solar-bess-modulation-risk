@@ -14,6 +14,8 @@ from solar_bess_risk.cli import DEFAULT_CSV_PATH, DEFAULT_MWAC, run_session
 from solar_bess_risk.config import (
     BACKTEST_YEARS,
     CAPEX_USD_PER_KWH,
+    CURTAILMENT_COLUMN,
+    CURTAILMENT_SHEET_2025,
     DURATIONS,
     HOURS_PER_YEAR,
     SCENARIO_TEMPLATES,
@@ -89,13 +91,23 @@ def _fetch_pld_for_year(year: int, params: SimulationParams) -> tuple[PriceProfi
     year_params = replace(params, bq_year=year)
 
     if 2021 <= year <= 2025:
-        return load_price_local_pld(year, params.bq_submarket), None
+        return load_price_local_pld(
+            year,
+            params.bq_submarket,
+            path=params.pld_path,
+            source_year=params.pld_source_year,
+        ), None
 
     if year == 2026:
         if params.pld_factor_2026 is not None:
             # Use the manually supplied factor — skip BigQuery entirely
             import numpy as np
-            base_profile = load_price_local_pld(2025, params.bq_submarket)
+            base_profile = load_price_local_pld(
+                2025,
+                params.bq_submarket,
+                path=params.pld_path,
+                source_year=params.pld_source_year,
+            )
             prices = np.array(base_profile.prices_brl_per_mwh, dtype=np.float64) * params.pld_factor_2026
             print(
                 f"    2026: fator PLD manual={params.pld_factor_2026:.4f}; "
@@ -119,7 +131,12 @@ def _fetch_pld_for_year(year: int, params: SimulationParams) -> tuple[PriceProfi
             f"    2026: {len(observed)} horas observadas; "
             "completando ano com base local 2025."
         )
-        base_profile = load_price_local_pld(2025, params.bq_submarket)
+        base_profile = load_price_local_pld(
+            2025,
+            params.bq_submarket,
+            path=params.pld_path,
+            source_year=params.pld_source_year,
+        )
         result = _project_partial_year_prices(
             observed,
             base_profile,
@@ -192,6 +209,11 @@ def _build_run_manifest(
         params={
             "csv_path": params.csv_path,
             "mwac": params.mwac,
+            "pld_path": params.pld_path,
+            "pld_source_year": params.pld_source_year,
+            "curtailment_path": params.curtailment_path,
+            "curtailment_sheet": CURTAILMENT_SHEET_2025,
+            "curtailment_column": CURTAILMENT_COLUMN,
             "bq_submarket": params.bq_submarket,
             "usd_brl_rate": params.usd_brl_rate,
             "useful_life_years": params.useful_life_years,
@@ -206,7 +228,10 @@ def _build_run_manifest(
         acumulado_years=None,
         curtailment={
             "enabled": curtailment_enabled,
-            "source": "dados/media_agregada_horaria_2025_2026.xlsx" if curtailment_enabled else None,
+            "source": params.curtailment_path if curtailment_enabled else None,
+            "sheet": CURTAILMENT_SHEET_2025 if curtailment_enabled else None,
+            "column": CURTAILMENT_COLUMN if curtailment_enabled else None,
+            "percent_denominator": "geracao limitada horaria (gen_lim_mw)",
         },
         rte={
             "path": rte_path,
@@ -251,6 +276,17 @@ def _parse_must_overrides(argv: list[str]) -> dict[str, float]:
                     f"ERRO: valor de {flag} ('{argv[idx + 1]}') não é numérico."
                 ) from exc
     return overrides
+
+
+def _parse_curtailment_path_override(argv: list[str]) -> str | None:
+    """Parse optional curtailment curve path override from ``argv``."""
+    flag = "--curtailment-path"
+    if flag not in argv:
+        return None
+    idx = argv.index(flag)
+    if idx + 1 >= len(argv):
+        raise ValueError(f"ERRO: flag {flag} requer um caminho de arquivo.")
+    return argv[idx + 1]
 
 
 def _parse_fixed_must_mw(argv: list[str]) -> float | None:
@@ -368,6 +404,7 @@ def _compute_must_reduction_scenarios(
         price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
         curt_series = get_curtailment_for_scenario(
             year, curtailment_enabled, _gen_lim,
+            path=params.curtailment_path,
             factor_2026=params.curtailment_factor_2026,
             factor_2025=params.curtailment_factor_2025,
         )
@@ -537,6 +574,7 @@ def _compute_must_results(
         price_profile = PriceProfile(pld, price_source, params.bq_submarket, year)
         curt_series = get_curtailment_for_scenario(
             year, curtailment_enabled, _gen_lim,
+            path=params.curtailment_path,
             factor_2026=params.curtailment_factor_2026,
             factor_2025=params.curtailment_factor_2025,
         )
@@ -603,6 +641,7 @@ def _compute_pitch_curtailment_swap_scenarios(
             curtailment_year,
             curtailment_enabled,
             _gen_lim,
+            path=params.curtailment_path,
             factor_2026=params.curtailment_factor_2026,
             factor_2025=params.curtailment_factor_2025,
         )
@@ -664,7 +703,7 @@ def main() -> None:
         )
         print("\nFerramenta de backtest solar + BESS com output HTML.")
         print("  --skip-excel    Não gera backtest_completo.xlsx.")
-        print("  --director-only Gera apenas relatorio_diretoria.html + manifest.")
+        print("  --director-only Gera apenas relatorio_anos_2025_2026_completo.html + manifest.")
         print("  --must-sweep    Habilita a otimização de redução de MUST por cenário.")
         print("  --must-mw       MUST contratado definido em MW (desativa otimização).")
         print("  --tust          TUST do projeto em R$/kW·mês (default 7.23).")
@@ -686,6 +725,7 @@ def main() -> None:
 
     must_sweep_enabled = "--must-sweep" in sys.argv
     must_overrides = _parse_must_overrides(sys.argv)
+    curtailment_path_override = _parse_curtailment_path_override(sys.argv)
     fixed_must_mw = _parse_fixed_must_mw(sys.argv)
     if must_sweep_enabled and fixed_must_mw is not None:
         raise ValueError("ERRO: use --must-sweep ou --must-mw, não ambos.")
@@ -696,12 +736,15 @@ def main() -> None:
         curtailment_enabled = True
         rte_path = "dados/11 - Envision.xlsx"
         charge_mode = 3
+        p90_year20_mwmed = 155.0
         print("  Modo quick-test: risco histórico limitado a 3 anos solares.")
     else:
-        params, curtailment_enabled, rte_path, charge_mode = run_session(service_account_path=sa_path)
+        params, curtailment_enabled, rte_path, charge_mode, p90_year20_mwmed = run_session(service_account_path=sa_path)
 
     if must_overrides:
         params = replace(params, **must_overrides)
+    if curtailment_path_override is not None:
+        params = replace(params, curtailment_path=curtailment_path_override)
     if fixed_must_mw is not None:
         reduction_pct = _fixed_must_reduction_pct(
             fixed_must_mw=fixed_must_mw,
@@ -721,7 +764,7 @@ def main() -> None:
     # curtailment. The 2026 profile is the 2025 shape scaled so its annual
     # curtailment/generation ratio reaches ``curtailment_target_pct_2026``.
     if curtailment_enabled:
-        from solar_bess_risk.config import CURTAILMENT_SHEET_2025, DEFAULT_CURTAILMENT_PATH
+        from solar_bess_risk.config import CURTAILMENT_SHEET_2025
         from solar_bess_risk.curtailment import load_curtailment_profile
 
         _gen_lim_arr = np.asarray(
@@ -729,7 +772,7 @@ def main() -> None:
             dtype=np.float64,
         )
         _sum_gen = float(np.sum(_gen_lim_arr))
-        _base_curt_frac = load_curtailment_profile(DEFAULT_CURTAILMENT_PATH, CURTAILMENT_SHEET_2025)
+        _base_curt_frac = load_curtailment_profile(params.curtailment_path, CURTAILMENT_SHEET_2025)
         realized_2025_ons_pct = (
             100.0 * float(np.sum(_base_curt_frac * _gen_lim_arr)) / _sum_gen if _sum_gen > 0 else 0.0
         )
@@ -799,6 +842,7 @@ def main() -> None:
         _gen_lim = solar.generation_lim_mw if solar.generation_lim_mw is not None else solar.generation_mw
         curt_series = get_curtailment_for_scenario(
             year, curtailment_enabled, _gen_lim,
+            path=params.curtailment_path,
             factor_2026=params.curtailment_factor_2026,
             factor_2025=params.curtailment_factor_2025,
         )
@@ -970,6 +1014,7 @@ def main() -> None:
             bq_submarket=params.bq_submarket,
             charge_mode=charge_mode,
             rte_metadata=rte_metadata,
+            params=params,
         )
         print(f"  HTML: {report_path}")
     else:
@@ -1017,7 +1062,7 @@ def main() -> None:
     from solar_bess_risk.report_consultancy import build_consultancy_report
     consultancy_path = build_consultancy_report(
         results_by_key,
-        output_dir / "relatorio_diretoria.html",
+        output_dir / "relatorio_anos_2025_2026_completo.html",
         mwac=params.mwac,
         usd_brl_rate=params.usd_brl_rate,
         bq_submarket=params.bq_submarket,
@@ -1043,10 +1088,10 @@ def main() -> None:
 
         import bess_pitch_agent
 
-        caminho_pitch_saida = output_dir / "pitch_diretoria_bess.html"
+        caminho_pitch_saida = output_dir / "relatorio_anos_2025_2026.html"
 
         # Executa o pipeline de inteligência e matemática do seguro
-        dados_operacionais = bess_pitch_agent.extrair_kpis_do_relatorio(str(output_dir / "relatorio_diretoria.html"))
+        dados_operacionais = bess_pitch_agent.extrair_kpis_do_relatorio(str(output_dir / "relatorio_anos_2025_2026_completo.html"))
         dados_financeiros = bess_pitch_agent.calcular_premio_seguro(dados_operacionais)
         dados_financeiros = bess_pitch_agent.adicionar_modulacao_equilibrio(
             dados_financeiros,
@@ -1069,7 +1114,7 @@ def main() -> None:
 
         # Pitch simplificado: quadros 1 e 2 com 3 cenários 2025 (existente,
         # estressado e leve) escalando a modulação dentro do piso/teto do PLD.
-        caminho_pitch_simpl = output_dir / "pitch_simplificado_bess.html"
+        caminho_pitch_simpl = output_dir / "cenarios_modulacao.html"
         bess_pitch_agent.gerar_html_simplificado(
             dados_financeiros,
             str(caminho_pitch_simpl),
@@ -1088,7 +1133,6 @@ def main() -> None:
     try:
         from solar_bess_risk.config import (
             CURTAILMENT_SHEET_2025,
-            DEFAULT_CURTAILMENT_PATH,
             RISK_MATRIX_DURATION_H,
         )
         from solar_bess_risk.curtailment import load_curtailment_profile
@@ -1105,7 +1149,7 @@ def main() -> None:
             base_curt_profile = None
             if curtailment_enabled:
                 base_curt_profile = load_curtailment_profile(
-                    DEFAULT_CURTAILMENT_PATH, CURTAILMENT_SHEET_2025
+                    params.curtailment_path, CURTAILMENT_SHEET_2025
                 )
             matrix_scenario = _get_scenario_for_duration(
                 RISK_MATRIX_DURATION_H,
@@ -1131,6 +1175,31 @@ def main() -> None:
             print(f"  [Matriz de Risco] HTML gerado: {matrix_path}")
     except Exception as e:
         print(f"  [Aviso Matriz de Risco] Não foi possível gerar a matriz: {e}")
+    # =========================================================================
+
+    # =========================================================================
+    # REPORT PPA: modulação do contrato flat (P90 ano 20) — sem e com BESS
+    # =========================================================================
+    try:
+        import sys as _sys
+        _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        if str(_scripts_dir) not in _sys.path:
+            _sys.path.insert(0, str(_scripts_dir))
+        from calc_modulacao_contrato_ppa import run_ppa_modulation_report
+
+        print(f"  [PPA Modulação] Calculando modulação do contrato flat "
+              f"({p90_year20_mwmed:.1f} MWmed)...")
+        ppa_csv, ppa_flat, ppa_sazo = run_ppa_modulation_report(
+            solar,
+            p90_year20_mwmed,
+            output_dir,
+            rte_table=rte_table,
+            params=params,
+        )
+        print(f"  [PPA Modulação] flat_anual: {ppa_flat}")
+        print(f"  [PPA Modulação] sazonalizado: {ppa_sazo}")
+    except Exception as e:
+        print(f"  [Aviso PPA Modulação] Não foi possível gerar o report: {e}")
     # =========================================================================
 
     # 6. Write manifest

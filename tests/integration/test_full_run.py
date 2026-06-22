@@ -147,6 +147,13 @@ class TestFullRun:
             mwac=100.0,
             usd_brl_rate=5.0,
             bq_submarket="NE",
+            params=SimulationParams(
+                csv_path="solar.csv",
+                mwac=100.0,
+                pld_path="dados/Brazil Q2 26 (Central)-bra-central-brl2025-system-1h.csv",
+                pld_source_year=2025,
+                curtailment_path="dados/media_agregada_horaria_2025_2026.xlsx",
+            ),
             rte_metadata={
                 "rte_source_file": "11 - Envision.xlsx",
                 "typical_block_mwh": 10.1,
@@ -156,6 +163,11 @@ class TestFullRun:
         content = Path(report_path).read_text(encoding="utf-8")
         assert Path(report_path).name == "report.html"
         assert "Submercado PLD:</strong> NE" in content
+        assert "Base PLD:</strong>" in content
+        assert "Brazil Q2 26 (Central)" in content
+        assert "Base curtailment ONS:</strong>" in content
+        assert "2025_horario" in content
+        assert "Conj. Pereira Barreto" in content
         assert "typical_block_mwh" in content
         assert "10.1" in content
         assert "pcs_mva" in content
@@ -218,7 +230,7 @@ class TestFullRun:
 
         path = build_consultancy_report(
             results_by_key,
-            tmp_path / "relatorio_diretoria.html",
+            tmp_path / "relatorio_anos_2025_2026_completo.html",
             mwac=100.0,
             usd_brl_rate=5.0,
             bq_submarket="SE",

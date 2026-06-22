@@ -4,12 +4,11 @@ This module expands the 2025 *base* scenario (no MUST reduction) across a grid
 of PLD multipliers and curtailment targets, producing a standalone HTML report
 (``matriz_risco.html``). It does **not** touch the existing 2025/2026 pipeline.
 
-Per cell it reports four metrics, consistent with the executive pitch table:
+Per cell it reports three metrics, consistent with the executive pitch table:
 
 - Modulação s/ BESS (R$/MWh)
 - Modulação c/ BESS (R$/MWh)
 - Modulação de Equilíbrio s/ BESS (R$/MWh)
-- Caixa Adicionado Total (R$ MM/ano)
 
 The PLD axis scales the 2025 base PLD profile by a multiplier; the curtailment
 axis scales the 2025 base curtailment fraction profile so each column reaches a
@@ -423,18 +422,7 @@ def build_risk_matrix_html(
     """Render the risk matrix to a standalone HTML file. Returns the path."""
     premio_mm = result.premium_brl / 1e6
 
-    tables = "".join(
-        [
-            _modulation_table(result, premio_mm),
-            _metric_table(
-                result,
-                premio_mm,
-                title="Caixa Adicionado Total (R$ MM/ano)",
-                extractor=lambda c: c.caixa_adicionado_mm,
-                formatter=lambda v: _fmt_caixa(v),
-            ),
-        ]
-    )
+    tables = _modulation_table(result, premio_mm)
 
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">

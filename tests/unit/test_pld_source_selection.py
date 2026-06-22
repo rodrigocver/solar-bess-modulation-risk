@@ -22,7 +22,11 @@ def test_fetch_pld_for_historical_year_uses_local_file(monkeypatch):
         bq_year=2025,
     )
 
-    monkeypatch.setattr(main_mod, "load_price_local_pld", lambda year, submarket: local_profile)
+    monkeypatch.setattr(
+        main_mod,
+        "load_price_local_pld",
+        lambda year, submarket, path=None, source_year=2025: local_profile,
+    )
     monkeypatch.setattr(
         main_mod,
         "fetch_price_bigquery",
@@ -54,7 +58,8 @@ def test_fetch_pld_for_2026_uses_bigquery_observed_and_local_2025_base(monkeypat
     )
     loaded_years: list[int] = []
 
-    def fake_load_local(year: int, submarket: str) -> PriceProfile:
+    def fake_load_local(year: int, submarket: str, path=None, source_year=2025) -> PriceProfile:
+        assert source_year == 2025
         loaded_years.append(year)
         return base_profile
 

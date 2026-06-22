@@ -106,6 +106,10 @@ MUST_SWEEP_STEP_PCT: float = 0.02       # fraction (0-1)
 # Scalar multiplier applied to the 2025 PLD base when filling unobserved 2026
 # hours.  None → auto-calculated from the ratio of observed 2026 vs 2025 PLD.
 DEFAULT_PLD_FACTOR_2026: float | None = None
+# Default PLD base: historical 2025 local CCEE curve under ``dados/pld``.
+# Set ``pld_path`` explicitly to use an alternate market-scenario CSV.
+DEFAULT_LOCAL_PLD_PATH: str | None = None
+DEFAULT_LOCAL_PLD_SOURCE_YEAR: int = 2025
 
 # Scalar multiplier applied to the curtailment profile loaded for 2026.
 # 1.0 = use the profile as-is; e.g. 0.8 = 20% lower curtailment in 2026.
@@ -124,8 +128,8 @@ DEFAULT_CURTAILMENT_FACTOR_2025: float = 1.0
 
 # Target ONS curtailment for 2025 as a percentage of generation. The 2025
 # realized ONS shape is scaled so the annual curtailment/generation ratio
-# reaches this target (default 10%).
-DEFAULT_CURTAILMENT_TARGET_PCT_2025: float = 10.0
+# reaches this target (default 20%).
+DEFAULT_CURTAILMENT_TARGET_PCT_2025: float = 20.0
 
 # PLD regulatory floor and ceiling (R$/MWh). Used to clamp scaled PLD series
 # when stressing/relaxing the modulation in the simplified pitch dashboard.
@@ -246,7 +250,7 @@ def size_bess_blocks(
 DEFAULT_CURTAILMENT_PATH: str = "dados/media_agregada_horaria_2025_2026.xlsx"
 DEFAULT_RTE_PATH: str = "dados/11 - Envision.xlsx"
 DEFAULT_RTE_COMMISSIONING_YEAR: int = 2025
-CURTAILMENT_COLUMN: str = "Media Agregada Todas as Usinas"
+CURTAILMENT_COLUMN: str = "Conj. Pereira Barreto"
 CURTAILMENT_SHEET_2025: str = "2025_horario"
 CURTAILMENT_SHEET_2026: str = "previsao_futura"
 
@@ -328,6 +332,14 @@ class SimulationParams:
     pld_factor_2026 : float | None
         Scalar multiplier applied to the 2025 PLD base when filling unobserved
         2026 hours.  None → factor is auto-calculated from BigQuery observed data.
+    pld_path : str | None
+        Optional local market-price CSV used as the default PLD curve. When set,
+        the loader uses ``pld_source_year`` from that file and remaps it to the
+        requested model year.
+    pld_source_year : int
+        Source year inside ``pld_path`` when an alternate market-scenario CSV is
+        provided. The default PLD path is ``None``, so the model uses the
+        historical 2025 local CCEE curve.
     curtailment_factor_2026 : float
         Scalar multiplier applied to the 2025 realized ONS curtailment profile to
         build the 2026 profile. Computed at runtime as
@@ -357,11 +369,14 @@ class SimulationParams:
     must_sweep_max_pct: float = MUST_SWEEP_MAX_PCT
     must_sweep_step_pct: float = MUST_SWEEP_STEP_PCT
     pld_factor_2026: float | None = DEFAULT_PLD_FACTOR_2026
+    pld_path: str | None = DEFAULT_LOCAL_PLD_PATH
+    pld_source_year: int = DEFAULT_LOCAL_PLD_SOURCE_YEAR
     curtailment_factor_2026: float = DEFAULT_CURTAILMENT_FACTOR_2026
     curtailment_target_pct_2026: float = DEFAULT_CURTAILMENT_TARGET_PCT_2026
     curtailment_factor_2025: float = DEFAULT_CURTAILMENT_FACTOR_2025
     curtailment_target_pct_2025: float = DEFAULT_CURTAILMENT_TARGET_PCT_2025
     curtailment_assumption_pct_2026: float = CURTAILMENT_ASSUMPTION_PCT_2026
+    curtailment_path: str = DEFAULT_CURTAILMENT_PATH
     gf_daily_coverage_target_pct: float | None = DEFAULT_GF_DAILY_COVERAGE_TARGET_PCT
     modulation_mode: str = DEFAULT_MODULATION_MODE
 

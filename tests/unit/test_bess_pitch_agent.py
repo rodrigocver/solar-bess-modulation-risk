@@ -249,12 +249,12 @@ def test_simplified_pitch_renders_fixed_must_as_separate_modulation_section(tmp_
     assert [s["titulo"] for s in base_scenarios] == [
         "2025 — Modulação Existente",
         "2025 — Estressado",
-        "2025 — Leve",
+        "2025 — Moderado",
     ]
     assert [s["titulo"] for s in must_scenarios] == [
         "2025 — Modulação Existente",
         "2025 — Estressado",
-        "2025 — Leve",
+        "2025 — Moderado",
     ]
     assert section_label == "MUST Definido"
     assert "540 MW" in section_description
@@ -287,8 +287,8 @@ def test_simplified_pitch_renders_fixed_must_as_separate_modulation_section(tmp_
     assert "540 MW" in html
     assert html.count("2025 — Modulação Existente") == 2
     assert html.count("2025 — Estressado") == 2
-    assert html.count("2025 — Leve") == 2
+    assert html.count("2025 — Moderado") == 2
     assert "Spread s/ BESS" in html
     assert "R$ -75/MWh" in html
-    assert "R$ -30/MWh" in html
+    assert "R$ -50/MWh" in html
     assert "Caixa Adicionado Total inclui" in html

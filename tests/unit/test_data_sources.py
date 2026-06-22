@@ -46,6 +46,21 @@ def _write_local_pld(path, year: int, *, price: float = 200.0, leap: bool = Fals
     path.write_text("\n".join(rows), encoding="utf-8")
 
 
+def _write_market_scenario(path):
+    rows = [
+        "Time;(UTC);Time;(Local);Wholesale market price",
+        "UTC;UTC-03:00;BRL/MWh;;",
+    ]
+    for ts in (datetime(2026, 10, 1) + timedelta(hours=i) for i in range(24)):
+        utc = ts + timedelta(hours=3)
+        rows.append(f"{utc:%d/%m/%Y};{utc:%H:%M:%S};{ts:%d/%m/%Y};{ts:%H:%M:%S};999.0")
+    for i in range(HOURS_PER_YEAR):
+        ts = datetime(2030, 1, 1) + timedelta(hours=i)
+        utc = ts + timedelta(hours=3)
+        rows.append(f"{utc:%d/%m/%Y};{utc:%H:%M:%S};{ts:%d/%m/%Y};{ts:%H:%M:%S};{100 + ts.hour:.1f}")
+    path.write_text("\n".join(rows), encoding="utf-8")
+
+
 class TestFetchPriceBigquery:
     """Tests for fetch_price_bigquery."""
 
@@ -197,3 +212,20 @@ def test_load_price_local_pld_missing_file_raises_datasource_error(tmp_path):
 
     with pytest.raises(DataSourceError, match="PLD local não encontrado"):
         load_price_local_pld(2025, "SE", base_dir=tmp_path)
+
+
+def test_load_price_local_pld_accepts_market_scenario_csv(tmp_path):
+    from solar_bess_risk.data_sources import load_price_local_pld
+
+    path = tmp_path / "market.csv"
+    _write_market_scenario(path)
+
+    result = load_price_local_pld(
+        2025, "SE", base_dir=tmp_path, path=path, source_year=2030
+    )
+
+    assert result.bq_year == 2025
+    assert len(result.prices_brl_per_mwh) == HOURS_PER_YEAR
+    assert result.prices_brl_per_mwh[0] == pytest.approx(100.0)
+    assert result.prices_brl_per_mwh[23] == pytest.approx(123.0)
+    assert "2030_as_2025" in result.source

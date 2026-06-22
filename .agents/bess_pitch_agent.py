@@ -17,7 +17,7 @@ PLD_CEILING_BRL_PER_MWH = 1611.04
 
 # Alvos de modulação s/ BESS (R$/MWh) dos cenários do dashboard simplificado.
 MODULACAO_ALVO_ESTRESSADO_BRL_MWH = 75.0
-MODULACAO_ALVO_LEVE_BRL_MWH = 30.0
+MODULACAO_ALVO_LEVE_BRL_MWH = 50.0
 
 def limpar_numero(texto):
     """Remove textos, espaços e símbolos (como % e R$) para converter em float."""
@@ -463,7 +463,7 @@ def _build_modulation_cases(
             ),
         ),
         _make(
-            "2025 — Leve",
+            "2025 — Moderado",
             f"{metric_label} s/ BESS escalado p/ R$ {light_target:.0f}/MWh",
             _scale_pld_to_target_modulation(
                 pld, injection_sem, gf_energy, light_target, mode
@@ -1042,7 +1042,7 @@ def gerar_html_simplificado(
         </table>
         <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
             Cenários com {must_description} mantêm o despacho com cap de MUST e,
-            nos casos estressado e leve, escalam apenas o PLD dentro do piso/teto.
+            nos casos estressado e moderado, escalam apenas o PLD dentro do piso/teto.
             O Caixa Adicionado Total inclui o ganho operacional mais a economia anual de TUST.
         </p>
     </div>
@@ -1200,7 +1200,7 @@ def gerar_html_simplificado(
             </tbody>
         </table>
         <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-muted); font-weight: 600;">
-            Cenários estressado e leve mantêm o despacho de 2025 e escalam o PLD por um fator uniforme,
+            Cenários estressado e moderado mantêm o despacho de 2025 e escalam o PLD por um fator uniforme,
             limitado ao piso (R$ {PLD_FLOOR_BRL_PER_MWH:.2f}/MWh) e ao teto (R$ {PLD_CEILING_BRL_PER_MWH:.2f}/MWh),
             até o {metric_label.lower()} s/ BESS atingir R$ {stressed_target:.0f}/MWh e R$ {light_target:.0f}/MWh, respectivamente.
         </p>

@@ -266,6 +266,7 @@ def export_premissas_energia(
         year,
         curtailment_enabled,
         gen_lim,
+        path=params.curtailment_path,
         factor_2026=params.curtailment_factor_2026,
         factor_2025=params.curtailment_factor_2025,
     )

@@ -22,6 +22,8 @@ from plotly.subplots import make_subplots
 
 from solar_bess_risk.config import (
     CAPEX_USD_PER_KWH,
+    CURTAILMENT_COLUMN,
+    CURTAILMENT_SHEET_2025,
     DEFAULT_MODULATION_MODE,
     HOURS_PER_YEAR,
 )
@@ -130,12 +132,29 @@ def _build_simulation_params_table(
     else:
         charge_mode_label = "Modo 0 - Cobertura de deficit"
 
+    pld_path = getattr(params, "pld_path", None)
+    pld_source_year = getattr(params, "pld_source_year", 2025)
+    if pld_path:
+        pld_base = f"{pld_path} (ano fonte {pld_source_year})"
+    else:
+        pld_base = (
+            "dados/pld/pld_horario_2025.csv como base 2025; "
+            "2026 usa BigQuery observado + projecao sobre a base 2025"
+        )
+    curtailment_base = (
+        f"{getattr(params, 'curtailment_path', 'n/a')} | "
+        f"aba {CURTAILMENT_SHEET_2025} | coluna {CURTAILMENT_COLUMN} | "
+        "percentual ponderado por geracao limitada"
+    )
+
     rows = [
         ("Curva solar", getattr(params, "csv_path", "n/a")),
         ("Capacidade AC", f"{mwac:,.1f} MW"),
         ("Garantia fisica", f"{garantia_fisica_mw:,.1f} MW"),
         ("Fator de capacidade", f"{fc * 100:,.2f}%"),
         ("Submercado PLD", bq_submarket),
+        ("Base PLD", pld_base),
+        ("Base curtailment ONS", curtailment_base),
         ("USD/BRL", f"{getattr(params, 'usd_brl_rate', 0.0):,.2f}"),
         ("Modo de operacao", charge_mode_label),
         ("Vida util economica", f"{getattr(params, 'useful_life_years', 'n/a')} anos"),

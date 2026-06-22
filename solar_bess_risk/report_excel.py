@@ -14,7 +14,12 @@ from html import escape
 import numpy as np
 import pandas as pd
 
-from solar_bess_risk.config import CAPEX_USD_PER_KWH, HOURS_PER_YEAR
+from solar_bess_risk.config import (
+    CAPEX_USD_PER_KWH,
+    CURTAILMENT_COLUMN,
+    CURTAILMENT_SHEET_2025,
+    HOURS_PER_YEAR,
+)
 from solar_bess_risk.config import BESS_BLOCK_SPECS
 from solar_bess_risk.simulation import DispatchResult
 
@@ -405,6 +410,31 @@ def _mode_label(charge_mode: int) -> str:
     )
 
 
+def _pld_base_label(params, bq_submarket: str) -> str:
+    """Return a human-readable PLD source label for the HTML report."""
+    if params is None:
+        return f"submercado {bq_submarket}"
+    pld_path = getattr(params, "pld_path", None)
+    pld_source_year = getattr(params, "pld_source_year", 2025)
+    if pld_path:
+        return f"{pld_path} (ano fonte {pld_source_year}, submercado {bq_submarket})"
+    return (
+        f"dados/pld/pld_horario_2025.csv como base 2025 para {bq_submarket}; "
+        "2026 usa BigQuery observado + projecao sobre a base 2025"
+    )
+
+
+def _curtailment_base_label(params) -> str:
+    """Return a human-readable curtailment source label for the HTML report."""
+    if params is None:
+        return "n/a"
+    return (
+        f"{getattr(params, 'curtailment_path', 'n/a')} | "
+        f"aba {CURTAILMENT_SHEET_2025} | coluna {CURTAILMENT_COLUMN} | "
+        "percentual ponderado por geracao limitada"
+    )
+
+
 def _add_excel_only_columns(
     df: pd.DataFrame,
     *,
@@ -729,6 +759,7 @@ def build_html_report(
     bq_submarket: str,
     charge_mode: int = 0,
     rte_metadata: dict[str, float | str] | None = None,
+    params=None,
 ) -> str:
     """Build a self-contained HTML report with one section per backtest tab."""
     output_path = Path(output_path)
@@ -797,6 +828,8 @@ def build_html_report(
         if charge_mode == 3
         else "Cobertura de Déficit — descarrega em qualquer hora com geração < GF"
     )
+    pld_base = _pld_base_label(params, bq_submarket)
+    curtailment_base = _curtailment_base_label(params)
     html = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -820,6 +853,8 @@ summary {{ cursor: pointer; font-weight: 700; padding: 8px 0; }}
 <h2>Premissas do Run</h2>
 <ul>
 <li><strong>Submercado PLD:</strong> {escape(bq_submarket)}</li>
+<li><strong>Base PLD:</strong> {escape(pld_base)}</li>
+<li><strong>Base curtailment ONS:</strong> {escape(curtailment_base)}</li>
 <li><strong>MWac:</strong> {mwac:,.2f}</li>
 <li><strong>USD/BRL:</strong> {usd_brl_rate:,.4f}</li>
 <li><strong>CAPEX por duração:</strong> 2h={CAPEX_USD_PER_KWH[2]:.2f}, 4h={CAPEX_USD_PER_KWH[4]:.2f} USD/kWh</li>

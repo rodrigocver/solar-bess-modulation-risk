@@ -13,7 +13,7 @@ class WatcherHandler(FileSystemEventHandler):
             return
             
         # 2. Verifica se o arquivo criado é exatamente o relatório que queremos
-        if os.path.basename(event.src_path) == 'relatorio_diretoria.html':
+        if os.path.basename(event.src_path) == 'relatorio_anos_2025_2026_completo.html':
             print(f"\n[+] Novo relatório detectado: {event.src_path}")
             
             # 3. Espera 2 segundos para garantir que o simulador terminou de salvar o arquivo
@@ -21,7 +21,7 @@ class WatcherHandler(FileSystemEventHandler):
             
             # 4. Descobre a pasta exata onde o relatório está (ex: a pasta do otimizador)
             pasta_origem = os.path.dirname(event.src_path)
-            caminho_saida = os.path.join(pasta_origem, 'pitch_diretoria_bess.html')
+            caminho_saida = os.path.join(pasta_origem, 'relatorio_anos_2025_2026.html')
             
             # 5. Aciona o Agente Pitch Deck
             try:

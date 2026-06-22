@@ -25,7 +25,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from solar_bess_risk.config import HOURS_PER_YEAR, SimulationParams
+from solar_bess_risk.config import (
+    DEFAULT_LOCAL_PLD_SOURCE_YEAR,
+    HOURS_PER_YEAR,
+    SimulationParams,
+)
 
 
 class DataSourceError(Exception):
@@ -171,13 +175,102 @@ def _normalise_hourly_prices(
     return prices
 
 
+def _load_price_market_scenario_csv(
+    path: Path,
+    year: int,
+    submarket: str,
+    *,
+    source_year: int = DEFAULT_LOCAL_PLD_SOURCE_YEAR,
+) -> PriceProfile:
+    """Load an Aurora-style market scenario CSV and return an 8760-hour curve.
+
+    These files can span several future years. The model consumes fixed
+    8760-hour curves, so the selected ``source_year`` is relabelled to the
+    requested backtest year for downstream alignment.
+    """
+    try:
+        df = pd.read_csv(path, sep=";", skiprows=[1])
+    except FileNotFoundError:
+        raise DataSourceError(f"PLD local não encontrado: {path}")
+    except Exception as exc:
+        raise DataSourceError(f"Erro ao ler PLD local {path}: {exc}") from exc
+
+    required = {"Time.1", "(Local)", "Wholesale market price"}
+    missing_cols = required.difference(df.columns)
+    if missing_cols:
+        raise DataSourceError(
+            f"{path}: colunas incompletas; faltando {sorted(missing_cols)}."
+        )
+
+    work = pd.DataFrame(
+        {
+            "datetime_original": pd.to_datetime(
+                df["Time.1"].astype(str) + " " + df["(Local)"].astype(str),
+                dayfirst=True,
+                errors="coerce",
+            ),
+            "pld": pd.to_numeric(df["Wholesale market price"], errors="coerce"),
+        }
+    )
+    if work["datetime_original"].isna().any():
+        raise DataSourceError(
+            f"{path}: {int(work['datetime_original'].isna().sum())} timestamps inválidos."
+        )
+    work = work.dropna(subset=["pld"]).copy()
+    work["source_year"] = work["datetime_original"].dt.year
+
+    selected = work[work["source_year"] == source_year].copy()
+    if _is_leap_year(source_year):
+        raise DataSourceError(
+            f"{path}: ano_fonte={source_year} é bissexto; use um ano de 8760h."
+        )
+    if selected["datetime_original"].nunique() != HOURS_PER_YEAR:
+        raise DataSourceError(
+            f"{path}: ano_fonte={source_year} possui "
+            f"{selected['datetime_original'].nunique()} horas únicas; esperado {HOURS_PER_YEAR}."
+        )
+    selected = selected.sort_values("datetime_original")
+    expected = _expected_index(year)
+    selected["datetime"] = expected
+    prices = _normalise_hourly_prices(
+        selected,
+        year=year,
+        source_label=f"{path}::{source_year}_mapped_to_{year}",
+        datetime_col="datetime",
+        price_col="pld",
+    )
+    print(
+        f"  PLD cenário local — arquivo={path}, ano_fonte={source_year}→{year}, "
+        f"submercado={submarket.upper()}, min=R${prices.min():.2f}, "
+        f"max=R${prices.max():.2f}, média=R${prices.mean():.2f}/MWh"
+    )
+    return PriceProfile(
+        prices_brl_per_mwh=prices,
+        source=f"local_market_scenario_{path.stem}_{source_year}_as_{year}",
+        bq_submarket=submarket.upper(),
+        bq_year=year,
+    )
+
+
 def load_price_local_pld(
     year: int,
     submarket: str,
     *,
     base_dir: str | Path = LOCAL_PLD_DIR,
+    path: str | Path | None = None,
+    source_year: int = DEFAULT_LOCAL_PLD_SOURCE_YEAR,
 ) -> PriceProfile:
     """Load hourly PLD from local CCEE CSV exports under ``dados/pld``."""
+    if path is not None:
+        pld_path = Path(path)
+        if pld_path.exists():
+            return _load_price_market_scenario_csv(
+                pld_path,
+                year,
+                submarket,
+                source_year=source_year,
+            )
+
     submarket_code = submarket.upper()
     submarket_label = _SUBMARKET_MAP.get(submarket_code, submarket_code)
     path = Path(base_dir) / f"pld_horario_{year}.csv"
