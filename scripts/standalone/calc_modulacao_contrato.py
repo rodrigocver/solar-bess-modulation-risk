@@ -31,7 +31,7 @@ from solar_bess_risk.config import HOURS_PER_YEAR
 from solar_bess_risk.profile import load_solar_csv
 
 SOLAR_CSV = Path("solar/solar_baguacu_m2_600mw_id8.csv")
-PRICE_CSV = Path("output/curvas/curvas_preco_brazil_q2_26_central_2030_2059.csv")
+PRICE_CSV = Path("dados/curvas_preco/curvas_preco_brazil_q2_26_central_2030_2059.csv")
 OUTPUT_DIR = Path("output/modulacao_contrato")
 MWAC = 600.0
 START_YEAR = 2030

@@ -30,6 +30,11 @@ Thumbs.db
 # Environment
 .env*
 !.env.example
+dados/keys.env
+dados/keys.txt
+
+# Aurora EOS API cache
+dados/aurora_cache/
 
 # Coverage
 htmlcov/

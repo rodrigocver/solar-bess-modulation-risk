@@ -10,8 +10,11 @@ Fluxo interativo:
   1. Confirma/seleciona a curva de geracao (solar/*.csv).
   2. Solicita o P90 do ano 20 em MWmed (padrao 155).
 
-Premissa de preco: curva central ja gerada (Aurora Central, Brazil Q2 26,
-2030-2059) — referida aqui como ``aurora_central``.
+Premissa de preco: por padrao busca a curva horaria na API Aurora EOS ao vivo
+(``load_price_aurora_api``), submercado configuravel (padrao ``SE``), sensibilidade
+``central``. Se a API estiver indisponivel, cai no snapshot offline congelado
+(``dados/curvas_preco/curvas_preco_brazil_q2_26_central_2030_2059.csv``), valido
+apenas para SE/central.
 
 Para cada ano do horizonte do PPA (20 anos, 2030-2049) calcula a modulacao do
 contrato flat em duas convencoes:
@@ -49,8 +52,12 @@ from solar_bess_risk.simulation import simulate_scenario
 
 SOLAR_DIR = Path("solar")
 DEFAULT_SOLAR_CSV = SOLAR_DIR / "solar_baguacu_m2_600mw_id8.csv"
-PRICE_CSV = Path("output/curvas/curvas_preco_brazil_q2_26_central_2030_2059.csv")
-PRICE_LABEL = "aurora_central"
+# Snapshot offline de fallback (apenas SE/central; usado se a API Aurora falhar).
+PRICE_CSV = Path("dados/curvas_preco/curvas_preco_brazil_q2_26_central_2030_2059.csv")
+PRICE_LABEL = "aurora_central_csv"
+DEFAULT_AURORA_SUBMARKET = "SE"
+DEFAULT_AURORA_SENSITIVITY = "central"
+VALID_AURORA_SUBMARKETS = ("SE", "S", "NE", "N")
 RTE_PATH = "dados/11 - Envision.xlsx"
 OUTPUT_DIR = Path("output/modulacao_contrato")
 START_YEAR = 2030
@@ -156,6 +163,99 @@ def _price_curves(path: Path) -> dict[int, np.ndarray]:
     return curves
 
 
+def _price_curves_aurora(
+    years: list[int],
+    submarket: str,
+    sensitivity: str,
+    *,
+    client=None,
+) -> dict[int, np.ndarray]:
+    """Curvas horárias (8760h) por ano via API Aurora EOS (``system-1h``).
+
+    Reusa um único cliente (cache de cenários em memória + CSV em disco), então
+    o arquivo horário é baixado uma vez e fatiado por ano-calendário.
+    """
+    from solar_bess_risk.aurora_api import AuroraScenarioExplorer
+    from solar_bess_risk.data_sources import load_price_aurora_api
+
+    if client is None:
+        client = AuroraScenarioExplorer()
+    curves: dict[int, np.ndarray] = {}
+    for year in years:
+        profile = load_price_aurora_api(
+            year, submarket, sensitivity=sensitivity, client=client,
+        )
+        curves[year] = profile.prices_brl_per_mwh
+    return curves
+
+
+def _resolve_price_curves(
+    years: list[int],
+    *,
+    submarket: str,
+    sensitivity: str,
+    use_api: bool,
+) -> tuple[dict[int, np.ndarray], str, str]:
+    """Resolve curvas de preço por ano, com fallback ao snapshot CSV.
+
+    Retorna ``(curves_by_year, price_label, price_desc)``. O fallback offline só
+    é válido para SE/central; para outros submercados/sensibilidades a falha da
+    API é propagada.
+    """
+    if use_api:
+        try:
+            curves = _price_curves_aurora(years, submarket, sensitivity)
+            label = f"aurora_{submarket.lower()}_{sensitivity}"
+            desc = (
+                f"API Aurora EOS ao vivo — {submarket.upper()}/{sensitivity}, "
+                f"cenário Brazil Q2 26 mais recente"
+            )
+            print(
+                f"  [PPA Modulação] Preço: API Aurora {submarket.upper()}/{sensitivity} "
+                f"({years[0]}–{years[-1]})."
+            )
+            return curves, label, desc
+        except Exception as exc:  # AuroraAPIError, DataSourceError, rede, token…
+            if (submarket.upper(), sensitivity) != ("SE", DEFAULT_AURORA_SENSITIVITY):
+                raise RuntimeError(
+                    f"Falha ao buscar a curva Aurora {submarket.upper()}/{sensitivity} "
+                    f"na API ({exc}). Não há snapshot offline para esse "
+                    f"submercado/sensibilidade."
+                ) from exc
+            print(
+                f"  [PPA Modulação] AVISO: API Aurora indisponível ({exc}); "
+                f"usando snapshot offline {PRICE_CSV}."
+            )
+
+    # Snapshot offline só existe para SE/central; recusa qualquer outro pedido.
+    if (submarket.upper(), sensitivity) != ("SE", DEFAULT_AURORA_SENSITIVITY):
+        raise RuntimeError(
+            f"Snapshot offline disponível apenas para SE/central; "
+            f"pedido {submarket.upper()}/{sensitivity}. Habilite a API (use_api=True)."
+        )
+    curves = _price_curves(PRICE_CSV)
+    curves = {y: v for y, v in curves.items() if y in years}
+    return curves, PRICE_LABEL, f"snapshot offline ({PRICE_CSV})"
+
+
+def prompt_submarket_aurora(default: str = DEFAULT_AURORA_SUBMARKET) -> str:
+    """Confirma o submercado da curva Aurora (central) para a modulação do PPA."""
+    choices = "/".join(VALID_AURORA_SUBMARKETS)
+    try:
+        raw = input(
+            f"  Submercado da curva Aurora (central) para a modulação do PPA "
+            f"[{choices}] (padrão {default}): "
+        ).strip().upper()
+    except (EOFError, StopIteration):
+        return default
+    if raw == "":
+        return default
+    if raw in VALID_AURORA_SUBMARKETS:
+        return raw
+    print(f"  Submercado inválido '{raw}'; usando {default}.")
+    return default
+
+
 def _contract_modulation_year(
     profile_mwh: np.ndarray,
     prices: np.ndarray,
@@ -206,16 +306,24 @@ def run_ppa_modulation_report(
     *,
     rte_table: dict[int, float] | None = None,
     params=None,
-) -> tuple[Path, Path, Path]:
+    submarket: str = DEFAULT_AURORA_SUBMARKET,
+    sensitivity: str = DEFAULT_AURORA_SENSITIVITY,
+    use_api: bool = True,
+) -> tuple[Path, Path]:
     """Compute PPA modulation report (flat anual) and write outputs.
 
     Callable by the main pipeline after solar and RTE are already loaded.
-    Returns (csv_path, flat_html_path).
+    O preço vem por padrão da API Aurora EOS ao vivo (``submarket``/``sensitivity``);
+    se ``use_api`` for ``False`` ou a API falhar (apenas SE/central), usa o snapshot
+    CSV offline. Returns (csv_path, flat_html_path).
     """
     if solar.generation_years_lim_mw is None:
         raise ValueError("CSV solar precisa ser multi-ano (gen_lim_mw).")
 
-    prices_by_year = _price_curves(PRICE_CSV)
+    target_years = list(range(START_YEAR, START_YEAR + PPA_TENOR_YEARS))
+    prices_by_year, price_label, price_desc = _resolve_price_curves(
+        target_years, submarket=submarket, sensitivity=sensitivity, use_api=use_api,
+    )
     if rte_table is None:
         rte_table = load_rte_table(RTE_PATH, commissioning_year=START_YEAR)
     rte_last = max(rte_table)
@@ -237,7 +345,7 @@ def run_ppa_modulation_report(
         f"BESS {base_scenario.bess_power_mw:.1f} MW / {base_scenario.bess_energy_mwh:.1f} MWh"
     )
 
-    years = [y for y in sorted(prices_by_year) if y < START_YEAR + PPA_TENOR_YEARS]
+    years = sorted(prices_by_year)
     rows: list[dict] = []
 
     for calendar_year in years:
@@ -261,8 +369,8 @@ def run_ppa_modulation_report(
         )
         price_profile = PriceProfile(
             prices_brl_per_mwh=prices,
-            source=f"{PRICE_LABEL}_{calendar_year}",
-            bq_submarket="-",
+            source=f"{price_label}_{calendar_year}",
+            bq_submarket=submarket.upper(),
             bq_year=calendar_year,
         )
         dispatch = simulate_scenario(
@@ -284,7 +392,7 @@ def run_ppa_modulation_report(
     df = pd.DataFrame(rows)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    slug = f"modulacao_contrato_ppa_{contract_mw:.0f}mw_{PRICE_LABEL}"
+    slug = f"modulacao_contrato_ppa_{contract_mw:.0f}mw_{price_label}"
     csv_path = output_dir / f"{slug}_anual.csv"
     df.to_csv(csv_path, index=False, float_format="%.6f")
 
@@ -298,6 +406,7 @@ def run_ppa_modulation_report(
     _write_report_html(
         df, summary, flat_html, contract_mw, gf, base_scenario,
         convention="flat", years=years,
+        price_label=price_label, price_desc=price_desc,
     )
 
     sem = summary.loc["sem BESS"]
@@ -318,6 +427,7 @@ def main() -> None:
 
     solar_csv, mwac = _prompt_solar_curve()
     contract_mw = _prompt_p90_year20()
+    submarket = prompt_submarket_aurora()
 
     solar = load_solar_csv(str(solar_csv), mwac)
     rte_table = load_rte_table(RTE_PATH, commissioning_year=START_YEAR)
@@ -325,6 +435,7 @@ def main() -> None:
 
     csv_path, flat_html = run_ppa_modulation_report(
         solar, contract_mw, OUTPUT_DIR, rte_table=rte_table, params=params,
+        submarket=submarket,
     )
     print(f"\nSaidas:\n  {csv_path}\n  {flat_html}")
 
@@ -343,6 +454,8 @@ def _write_report_html(
     *,
     convention: str,
     years: list[int],
+    price_label: str = PRICE_LABEL,
+    price_desc: str = "",
 ) -> None:
     is_flat = convention == "flat"
     conv_label = "Flat anual" if is_flat else "Sazonalizado"
@@ -384,7 +497,7 @@ def _write_report_html(
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
-<title>Modulação PPA {_fmt(contract_mw, 0)} MW — {conv_label} — aurora_central</title>
+<title>Modulação PPA {_fmt(contract_mw, 0)} MW — {conv_label} — {escape(price_label)}</title>
 <style>
   body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 2rem auto; max-width: 1280px;
          color: #1f2937; background: #f8fafc; }}
@@ -428,7 +541,7 @@ def _write_report_html(
       ({_fmt(contract_mw / gf * 100, 0)}% da garantia física {_fmt(gf, 1)} MWmed). Apenas este volume é modulado;
       a sobra descontratada (G − C) é risco de preço e fica fora desta conta.</li>
   <li>Horizonte do PPA: {years[0]}–{years[-1]} ({len(years)} anos).</li>
-  <li>Preço: curva central já gerada (<code>aurora_central</code> — {escape(str(PRICE_CSV))}).</li>
+  <li>Preço: <code>{escape(price_label)}</code> — {escape(price_desc)}.</li>
   <li>Custo de modulação = C × 8.760h × (PLD&#772; flat − PLD ponderado pelo perfil volume-neutro),
       em R$/MWh contratado. Convenção <strong>{conv_label.lower()}</strong>: {escape(conv_desc)}</li>
   <li>BESS (cenário inicial do projeto): bloco {BESS_DURATION_H}h

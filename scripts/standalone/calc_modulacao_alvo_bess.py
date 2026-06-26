@@ -606,7 +606,7 @@ resolvido por ano para fechar o alvo exato. Curvas completas em <code>curvas_pre
 </div>
 </details>
 
-<p class="note">Gerado em {generated} por scripts/calc_modulacao_alvo_bess.py.
+<p class="note">Gerado em {generated} por scripts/standalone/calc_modulacao_alvo_bess.py.
 Despacho com previsão perfeita de PLD (limite superior do ganho de arbitragem).
 Resultados anuais completos em <code>modulacao_alvo_bess_anual.csv</code>; fatores de escala em
 <code>fatores_escala_pld.csv</code>.</p>

@@ -47,7 +47,7 @@ from solar_bess_risk.rte import load_rte_table
 from solar_bess_risk.simulation import ScenarioDefinition, simulate_scenario
 
 SOLAR_CSV = Path("solar/solar_baguacu_m2_600mw_id8.csv")
-PRICE_CSV = Path("output/curvas/curvas_preco_brazil_q2_26_central_2030_2059.csv")
+PRICE_CSV = Path("dados/curvas_preco/curvas_preco_brazil_q2_26_central_2030_2059.csv")
 CURTAILMENT_CSV = Path("dados/curtailment_8760_conj_seriemas_i_ano_medio_total_pct.csv")
 RTE_PATH = "dados/11 - Envision.xlsx"
 OUTPUT_DIR = Path("output/modulacao_contrato")
@@ -432,7 +432,7 @@ def _write_html(
 </table>
 </div>
 
-<p class="note">Gerado em {generated} por scripts/calc_modulacao_contrato_bess.py.
+<p class="note">Gerado em {generated} por scripts/standalone/calc_modulacao_contrato_bess.py.
 Despacho com previsão perfeita de PLD (limite superior do ganho de arbitragem).</p>
 </body>
 </html>

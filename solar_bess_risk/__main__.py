@@ -314,6 +314,27 @@ def _parse_fixed_must_mw(argv: list[str]) -> float | None:
     return value
 
 
+def _prompt_ppa_aurora_submarket(default: str = "SE") -> str:
+    """Confirma o submercado da curva Aurora (central) usada no relatório de PPA.
+
+    Sem TTY (execução automatizada) retorna o default sem bloquear.
+    """
+    valid = ("SE", "S", "NE", "N")
+    try:
+        raw = input(
+            f"  Submercado da curva Aurora (central) p/ modulação do PPA "
+            f"[{'/'.join(valid)}] (padrão {default}): "
+        ).strip().upper()
+    except (EOFError, StopIteration):
+        return default
+    if raw == "":
+        return default
+    if raw in valid:
+        return raw
+    print(f"  Submercado inválido '{raw}'; usando {default}.")
+    return default
+
+
 def _fixed_must_reduction_pct(*, fixed_must_mw: float, mwac: float) -> float:
     """Convert a fixed contracted MUST in MW to a reduction fraction."""
     if fixed_must_mw < 0.0 or fixed_must_mw > mwac:
@@ -740,6 +761,10 @@ def main() -> None:
         print("  Modo quick-test: risco histórico limitado a 3 anos solares.")
     else:
         params, curtailment_enabled, rte_path, charge_mode, p90_year20_mwmed = run_session(service_account_path=sa_path)
+
+    # Submercado da curva Aurora (central) para o relatório de modulação do PPA.
+    # Default SE; confirmado pelo usuário em runs interativos.
+    ppa_aurora_submarket = "SE" if quick_test else _prompt_ppa_aurora_submarket()
 
     if must_overrides:
         params = replace(params, **must_overrides)
@@ -1182,19 +1207,20 @@ def main() -> None:
     # =========================================================================
     try:
         import sys as _sys
-        _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        _scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "pipeline"
         if str(_scripts_dir) not in _sys.path:
             _sys.path.insert(0, str(_scripts_dir))
         from calc_modulacao_contrato_ppa import run_ppa_modulation_report
 
         print(f"  [PPA Modulação] Calculando modulação do contrato flat "
-              f"({p90_year20_mwmed:.1f} MWmed)...")
+              f"({p90_year20_mwmed:.1f} MWmed) — preço Aurora {ppa_aurora_submarket}/central...")
         ppa_csv, ppa_flat = run_ppa_modulation_report(
             solar,
             p90_year20_mwmed,
             output_dir,
             rte_table=rte_table,
             params=params,
+            submarket=ppa_aurora_submarket,
         )
         print(f"  [PPA Modulação] flat_anual: {ppa_flat}")
     except Exception as e:

@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 INPUT_PATH = ROOT / "dados" / "Aurora_Q2_26_BRA_Grid_Curtailment_Forecast_Data.xlsx"
 OUTPUT_ANNUAL = ROOT / "dados" / "aurora_seriemas_cluster23_curtailment_annual.csv"
 OUTPUT_MONTHLY = ROOT / "dados" / "aurora_seriemas_cluster23_curtailment_monthly.csv"

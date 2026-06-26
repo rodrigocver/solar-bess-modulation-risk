@@ -81,6 +81,14 @@ _PIVOT_COLUMN_BY_SUBMARKET: dict[str, str] = {
     "N": "NORTE",
 }
 
+# Submercado CCEE → regionCode da Aurora EOS Scenario Explorer.
+_AURORA_REGION_BY_SUBMARKET: dict[str, str] = {
+    "SE": "bra_se",
+    "S": "bra_su",
+    "NE": "bra_ne",
+    "N": "bra_no",
+}
+
 LEGACY_BQ_QUERY = f"""\
 SELECT date, hora, value
 FROM `{BQ_LEGACY_TABLE}`
@@ -337,6 +345,139 @@ def load_price_local_pld(
         prices_brl_per_mwh=prices,
         source=f"local_pld_{submarket_code}_{year}",
         bq_submarket=submarket_code,
+        bq_year=year,
+    )
+
+
+def load_price_aurora_api(
+    year: int,
+    submarket: str,
+    *,
+    sensitivity: str = "central",
+    currency: str | None = None,
+    scenario_name_contains: str | None = None,
+    client=None,
+) -> PriceProfile:
+    """Carrega o preço horário (8760h) da Aurora EOS para um submercado.
+
+    Usa o arquivo ``system-1h`` (``Wholesale market price``, BRL/MWh) do cenário
+    Aurora mais recente para o submercado/sensibilidade pedidos e alinha à grade
+    fixa de 8.760 horas do modelo (29/fev é removido em anos bissextos). Os
+    timestamps usados são os de horário local (``Time (Local)``, UTC-03:00).
+
+    Parameters
+    ----------
+    year : int
+        Ano-calendário a extrair. Deve estar coberto integralmente pelos dados
+        (a Aurora publica anos completos a partir de 2027; 2026 é parcial).
+    submarket : str
+        Submercado CCEE: ``SE``, ``S``, ``NE`` ou ``N``.
+    sensitivity : str
+        ``central`` (padrão), ``low`` ou ``high``.
+    currency : str, optional
+        Código de moeda; padrão é o do cenário (``brl2025``).
+    scenario_name_contains : str, optional
+        Fixa uma safra específica (ex.: ``"Q2 26"``) em vez do mais recente.
+    client : AuroraScenarioExplorer, optional
+        Cliente já instanciado (reuso de cache/token; injetável em testes).
+
+    Raises
+    ------
+    DataSourceError
+        Submercado inválido, falha de API, ano ausente/parcial ou série que não
+        normaliza para 8.760 horas.
+    """
+    region_code = _AURORA_REGION_BY_SUBMARKET.get(submarket.upper())
+    if region_code is None:
+        raise DataSourceError(
+            f"Submercado inválido para Aurora: {submarket!r}. "
+            f"Use um de {sorted(_AURORA_REGION_BY_SUBMARKET)}."
+        )
+
+    try:
+        from solar_bess_risk import aurora_api
+    except ImportError as exc:
+        raise DataSourceError(
+            "Cliente Aurora indisponível. Instale com: uv add requests"
+        ) from exc
+
+    if client is None:
+        client = aurora_api.AuroraScenarioExplorer()
+
+    try:
+        if scenario_name_contains:
+            matches = client.find_scenarios(
+                region=region_code,
+                sensitivity=sensitivity,
+                name_contains=scenario_name_contains,
+            )
+            if not matches:
+                raise DataSourceError(
+                    f"Nenhum cenário Aurora para {region_code}/{sensitivity} "
+                    f"contendo {scenario_name_contains!r}."
+                )
+            scenario = matches[0]
+        else:
+            scenario = client.latest_scenario(region_code, sensitivity)
+        df = client.download(scenario, "system", "1h", currency=currency)
+    except aurora_api.AuroraAPIError as exc:
+        raise DataSourceError(f"Erro ao acessar Aurora API: {exc}") from exc
+
+    required = {"Time (Local)", "Wholesale market price"}
+    missing_cols = required.difference(df.columns)
+    if missing_cols:
+        raise DataSourceError(
+            f"Aurora system-1h: colunas incompletas; faltando {sorted(missing_cols)}."
+        )
+
+    work = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(df["Time (Local)"], errors="coerce"),
+            "pld": pd.to_numeric(df["Wholesale market price"], errors="coerce"),
+        }
+    )
+    if work["datetime"].isna().any():
+        raise DataSourceError(
+            f"Aurora system-1h: {int(work['datetime'].isna().sum())} timestamps inválidos."
+        )
+
+    in_year = work[work["datetime"].dt.year == year]
+    if in_year.empty:
+        available = sorted(work["datetime"].dt.year.unique().tolist())
+        raise DataSourceError(
+            f"Aurora system-1h: ano {year} ausente. Anos disponíveis: {available}."
+        )
+
+    # Um ano completo cobre 01/jan 00h até 31/dez 23h (29/fev é descartado depois).
+    first, last = in_year["datetime"].min(), in_year["datetime"].max()
+    if (first.month, first.day, first.hour) != (1, 1, 0) or (
+        last.month,
+        last.day,
+        last.hour,
+    ) != (12, 31, 23):
+        raise DataSourceError(
+            f"Aurora system-1h: ano {year} parcial (cobre {first} a {last}); "
+            f"escolha um ano completo (>= 2027)."
+        )
+
+    scenario_label = getattr(scenario, "label", f"{region_code}/{sensitivity}")
+    prices = _normalise_hourly_prices(
+        work,
+        year=year,
+        source_label=f"aurora_api::{scenario_label}",
+        datetime_col="datetime",
+        price_col="pld",
+    )
+    cur = currency or getattr(scenario, "default_currency", "")
+    print(
+        f"  Preço Aurora EOS — {region_code}/{sensitivity} ({cur}), ano={year}, "
+        f"min=R${prices.min():.2f}, max=R${prices.max():.2f}, "
+        f"média=R${prices.mean():.2f}/MWh"
+    )
+    return PriceProfile(
+        prices_brl_per_mwh=prices,
+        source=f"aurora_api_{region_code}_{sensitivity}_{scenario.hash[:8]}_{year}",
+        bq_submarket=submarket.upper(),
         bq_year=year,
     )
 
