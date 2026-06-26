@@ -9,7 +9,7 @@ The project intentionally reuses the existing `solar_bess_risk` package as a rea
 From the repository root:
 
 ```bash
-PYTHONPATH=. python new_projects/pld-solar-monthly-modulation/src/solar_monthly_modulation/cli.py \
+PYTHONPATH=. python historico_modulacao/src/solar_monthly_modulation/cli.py \
   --csv-path solar/solar_baguacu_m2_600mw_id14.csv \
   --mwac 600 \
   --years 2021 2022 2023 2024 2025 2026 \

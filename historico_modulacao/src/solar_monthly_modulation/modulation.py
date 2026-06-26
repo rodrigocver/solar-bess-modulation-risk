@@ -223,16 +223,13 @@ def _period_row_for_timestamps(
     weighted_revenue_brl = float(np.sum(generation_mwh * price_values))
     flat_price_brl_per_mwh = float(np.mean(price_values))
 
-    # Modulação referenciada à garantia física (obrigação de entrega), não à
-    # energia gerada. GF_mw = média horária da geração anual; a energia de GF do
-    # período = GF_mw × horas do período. A energia injetada apenas abate o custo:
-    #   modulação = PLD_médio − Σ(geração × PLD) / energia_GF
-    # No agregado anual sem curtailment, energia_GF == geração total e o resultado
-    # coincide com a captura ponderada pela geração; em meses de alta/baixa geração
-    # a referência à GF revela a sobre/sub-entrega frente à obrigação.
-    garantia_fisica_mw = float(np.mean(annual_generation_mwh))
-    gf_energy_mwh = garantia_fisica_mw * len(generation_mwh)
-    captured_price_brl_per_mwh = weighted_revenue_brl / gf_energy_mwh
+    # Modulação referenciada à energia efetivamente gerada — consistente entre
+    # mês e ano (a análise é mensal). O preço capturado é a média do PLD
+    # ponderada pela geração do próprio período:
+    #   captura   = Σ(geração × PLD) / Σ(geração)
+    #   modulação = PLD_médio − captura
+    # Sobre a curva cheia de geração sem BESS, sem curtailment.
+    captured_price_brl_per_mwh = weighted_revenue_brl / generation_total_mwh
     modulation_value_brl_per_mwh = (
         flat_price_brl_per_mwh - captured_price_brl_per_mwh
     )

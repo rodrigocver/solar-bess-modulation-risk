@@ -31,29 +31,35 @@ def _prices(year: int = 2021) -> PriceProfile:
     return PriceProfile(arr, f"local_pld_SE_{year}", "SE", year)
 
 
-def test_monthly_modulation_uses_gf_referenced_price():
+def test_monthly_modulation_uses_generation_weighted_price():
+    # Janeiro com variação intra-mês: gera mais quando o PLD está baixo (padrão
+    # solar), então a captura fica abaixo do flat → modulação positiva. A
+    # ponderação é pela energia gerada do próprio mês (não pela garantia física).
     generation = np.ones(HOURS_PER_YEAR)
-    generation[0:744] = 2.0
-    prices = _prices()
+    prices_arr = np.full(HOURS_PER_YEAR, 100.0)
+    generation[0:372] = 2.0
+    prices_arr[0:372] = 50.0
+    generation[372:744] = 1.0
+    prices_arr[372:744] = 150.0
+    prices = PriceProfile(prices_arr, "local_pld_SE_2021", "SE", 2021)
 
     monthly = calculate_monthly_modulation(generation, prices, mwac=10.0)
     january = monthly.loc[monthly["month"] == 1].iloc[0]
 
-    # Modulação referenciada à garantia física: GF_mw = média horária anual,
-    # energia de GF do mês = GF_mw × horas do mês; captura = receita / energia_GF.
-    gf_mw = float(np.mean(generation))
-    gf_energy_jan = gf_mw * 744
-    expected_revenue = 1488.0 * 200.0
-    expected_captured = expected_revenue / gf_energy_jan
+    expected_revenue = 372 * (2.0 * 50.0) + 372 * (1.0 * 150.0)
+    expected_generation = 372 * 2.0 + 372 * 1.0
+    expected_captured = expected_revenue / expected_generation
+    expected_flat = float(np.mean(prices_arr[0:744]))
 
     assert january["hours"] == 744
-    assert january["generation_mwh"] == 1488.0
-    assert january["flat_price_brl_per_mwh"] == 200.0
-    assert january["captured_price_brl_per_mwh"] == expected_captured
-    assert january["modulation_value_brl_per_mwh"] == 200.0 - expected_captured
+    assert january["generation_mwh"] == expected_generation
     assert january["weighted_revenue_brl"] == expected_revenue
-    assert january["modulation_factor"] == expected_captured / 200.0
-    assert january["generation_per_mwac_mwh_per_mwac"] == 148.8
+    assert january["flat_price_brl_per_mwh"] == expected_flat
+    assert january["captured_price_brl_per_mwh"] == expected_captured
+    assert january["modulation_value_brl_per_mwh"] == expected_flat - expected_captured
+    assert january["modulation_factor"] == expected_captured / expected_flat
+    assert january["captured_price_brl_per_mwh"] < expected_flat
+    assert january["generation_per_mwac_mwh_per_mwac"] == expected_generation / 10.0
 
 
 def test_annual_modulation_matches_manual_weighted_average():
