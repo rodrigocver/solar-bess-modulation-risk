@@ -48,5 +48,6 @@ coverage.xml
 # pytest
 .pytest_cache/
 
-# agentmemory runtime
+# Runtime das skills .agents — state store/memória (mem:audit, mem:health).
+# Recriado automaticamente pelas skills; NÃO confundir com dados/ (dados do projeto).
 data/
