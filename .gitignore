@@ -36,6 +36,9 @@ dados/keys.txt
 # Aurora EOS API cache
 dados/aurora_cache/
 
+# Dados brutos PSR 2025 (60 CSVs de ~36MB — fora do git; manter backup externo)
+dados/psr_2025/precos/
+
 # Coverage
 htmlcov/
 .coverage
