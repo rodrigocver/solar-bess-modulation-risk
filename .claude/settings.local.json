@@ -32,7 +32,23 @@
       "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/solar-bess-modulation-risk && time .venv/bin/python scripts/calc_modulacao_alvo_bess.py\")",
       "Bash(awk -F, 'NR==1{for\\(i=1;i<=NF;i++\\){if\\($i==\"mod_target_brl_mwh\"\\)t=i; if\\($i==\"curtailment_target_pct\"\\)c=i; if\\($i==\"bess_coverage_pct\"\\)b=i; if\\($i==\"mod_cost_brl_mwh\"\\)m=i; if\\($i==\"curt_lost_pct_gen\"\\)p=i; if\\($i==\"curt_recovered_gwh\"\\)r=i}} NR>1{key=$t\"|\"$c\"|\"$b; mod[key]+=$m; curt[key]+=$p; rec[key]+=$r; n[key]++} END{for\\(k in mod\\) printf \"%s  mod=%.2f  curt_pos=%.2f%%  rec=%.1fGWh\\\\n\", k, mod[k]/n[k], curt[k]/n[k], rec[k]/n[k]}' output/modulacao_alvo/modulacao_alvo_bess_anual.csv)",
       "Bash(wsl.exe -d Debian -- bash -lc \"cd /home/cver/projects/uhr-prospecting && find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.venv/*' -not -path '*/__pycache__/*' | head -300\")",
-      "Bash(wsl.exe -d Debian -- bash -lc 'cd /home/cver/projects/uhr-prospecting && for f in gedal/engine/cost_model.py gedal/engine/hydropower.py gedal/engine/pairing.py; do echo \"===== $f \\(__CMDSUB_OUTPUT__ lines\\) =====\"; done && echo '\\\\''---'\\\\'' && wc -l gedal/engine/*.py gedal/iotools/restrictions.py gedal/iotools/brownfield.py')"
+      "Bash(wsl.exe -d Debian -- bash -lc 'cd /home/cver/projects/uhr-prospecting && for f in gedal/engine/cost_model.py gedal/engine/hydropower.py gedal/engine/pairing.py; do echo \"===== $f \\(__CMDSUB_OUTPUT__ lines\\) =====\"; done && echo '\\\\''---'\\\\'' && wc -l gedal/engine/*.py gedal/iotools/restrictions.py gedal/iotools/brownfield.py')",
+      "Bash(cd \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\debian\\\\\\\\home\\\\\\\\cver\\\\\\\\projects\\\\\\\\solar-bess-modulation-risk\" 2>/dev/null *)",
+      "Bash(cd \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\debian\\\\\\\\home\\\\\\\\cver\\\\\\\\projects\\\\\\\\solar-bess-modulation-risk\")",
+      "Bash(wsl.exe -d *)",
+      "Bash(git config *)",
+      "Bash(gh repo *)",
+      "Bash(ls -la)",
+      "Bash(cd \"\\\\\\\\\\\\\\\\wsl.localhost\\\\\\\\debian\\\\\\\\home\\\\\\\\cver\\\\\\\\projects\\\\\\\\solar-bess-modulation-risk\" 2>/dev/null; echo \"=== solar_bess_risk ===\"; ls -R solar_bess_risk 2>/dev/null | head -60; echo \"=== scripts ===\"; ls scripts 2>/dev/null; echo \"=== requirements ===\"; cat requirements.txt 2>/dev/null; echo \"=== pyproject ===\"; cat pyproject.toml 2>/dev/null)",
+      "WebFetch(domain:eos.auroraer.com)",
+      "WebSearch",
+      "Bash(sed -E 's/\\(.{6}\\).*/\\\\1****\\(masked\\)/' dados/keys.txt)",
+      "Bash(curl -s -m 25 \"https://eos.auroraer.com/api-docs/swagger-config\")",
+      "Bash(curl -s -m 25 \"https://eos.auroraer.com/api-docs/\")",
+      "Bash(curl -s -m 30 \"https://eos.auroraer.com/api-docs/scenario-explorer.yml\" -o /tmp/scenario-explorer.yml)",
+      "Read(//tmp/**)",
+      "Bash(awk '{ if \\(length\\($0\\)>10\\) print substr\\($0,1,12\\)\"...\\(masked, len=\"length\\($0\\)\"\\)\"; else print $0 }' dados/keys.txt)",
+      "Bash(sed -E 's/\\(=|:\\)[[:space:]]*.+/\\\\1 <MASKED>/' dados/keys.txt)"
     ]
   }
 }
